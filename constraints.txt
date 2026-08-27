@@ -53,7 +53,7 @@ certifi==2026.7.22
     #   requests
 cffi==2.1.1
     # via cryptography
-charset-normalizer==3.5.0
+charset-normalizer==3.5.1
     # via requests
 chromadb==1.5.9
     # via deepcatalog (pyproject.toml)
@@ -80,7 +80,7 @@ fastapi==0.141.1
     # via
     #   google-adk
     #   deepcatalog (pyproject.toml)
-filelock==3.32.3
+filelock==3.32.4
     # via huggingface-hub
 flatbuffers==25.12.19
     # via onnxruntime
@@ -90,13 +90,13 @@ frozenlist==1.8.0
     #   aiosignal
 fsspec==2026.7.0
     # via huggingface-hub
-google-adk==2.6.3
+google-adk==2.7.1
     # via deepcatalog (pyproject.toml)
 google-auth==2.56.3
     # via
     #   google-adk
     #   google-genai
-google-genai==2.18.0
+google-genai==2.19.0
     # via
     #   google-adk
     #   deepcatalog (pyproject.toml)
@@ -117,7 +117,7 @@ hf-xet==1.6.0
     # via huggingface-hub
 httpcore==1.0.9
     # via httpx
-httpcore2==2.10.0
+httpcore2==2.12.0
     # via httpx2
 httptools==0.8.0
     # via uvicorn
@@ -128,11 +128,11 @@ httpx==0.28.1
     #   google-genai
     #   huggingface-hub
     #   deepcatalog (pyproject.toml)
-httpx2==2.10.0
+httpx2==2.12.0
     # via openai
-huggingface-hub==1.27.0
+huggingface-hub==1.28.0
     # via tokenizers
-idna==3.18
+idna==3.19
     # via
     #   anyio
     #   httpx
@@ -167,7 +167,7 @@ multidict==6.7.1
     # via
     #   aiohttp
     #   yarl
-mypy==2.3.0
+mypy==2.3.1
     # via deepcatalog (pyproject.toml)
 mypy-extensions==1.1.0
     # via mypy
@@ -179,31 +179,31 @@ oauthlib==3.3.1
     # via requests-oauthlib
 onnxruntime==1.28.0
     # via chromadb
-openai==3.2.0
+openai==3.3.1
     # via deepcatalog (pyproject.toml)
-opentelemetry-api==1.42.1
+opentelemetry-api==1.44.0
     # via
     #   chromadb
     #   google-adk
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions
-opentelemetry-exporter-otlp-proto-common==1.42.1
+opentelemetry-exporter-otlp-proto-common==1.44.0
     # via opentelemetry-exporter-otlp-proto-grpc
-opentelemetry-exporter-otlp-proto-grpc==1.42.1
+opentelemetry-exporter-otlp-proto-grpc==1.44.0
     # via chromadb
-opentelemetry-proto==1.42.1
+opentelemetry-proto==1.44.0
     # via
     #   opentelemetry-exporter-otlp-proto-common
     #   opentelemetry-exporter-otlp-proto-grpc
-opentelemetry-sdk==1.42.1
+opentelemetry-sdk==1.44.0
     # via
     #   chromadb
     #   google-adk
     #   opentelemetry-exporter-otlp-proto-grpc
-opentelemetry-semantic-conventions==0.63b1
+opentelemetry-semantic-conventions==0.65b0
     # via opentelemetry-sdk
-orjson==3.11.9
+orjson==3.12.0
     # via chromadb
 overrides==7.7.0
     # via chromadb
@@ -233,7 +233,7 @@ propcache==0.5.2
     # via
     #   aiohttp
     #   yarl
-protobuf==6.33.6
+protobuf==7.36.0
     # via
     #   googleapis-common-protos
     #   onnxruntime
@@ -256,15 +256,15 @@ pydantic==2.13.4
     #   google-genai
     #   openai
     #   pydantic-settings
-pydantic-core==2.46.4
+pydantic-core==2.48.0
     # via pydantic
 pydantic-settings==2.15.0
     # via chromadb
-pygments==2.20.0
+pygments==2.21.0
     # via
     #   pytest
     #   rich
-pypdf==6.16.0
+pypdf==6.16.2
     # via deepcatalog (pyproject.toml)
 pypika==0.51.1
     # via chromadb
@@ -280,7 +280,7 @@ pytest-cov==7.1.0
     # via deepcatalog (pyproject.toml)
 python-dateutil==2.9.0.post0
     # via kubernetes
-python-dotenv==1.2.2
+python-dotenv==1.2.3
     # via
     #   google-adk
     #   deepcatalog (pyproject.toml)
@@ -320,7 +320,7 @@ rpds-py==2026.6.3
     # via
     #   jsonschema
     #   referencing
-ruff==0.16.3
+ruff==0.16.4
     # via deepcatalog (pyproject.toml)
 shellingham==1.5.4
     # via typer
@@ -385,7 +385,7 @@ urllib3==2.7.0
     # via
     #   kubernetes
     #   requests
-uvicorn==0.52.3
+uvicorn==0.52.4
     # via
     #   chromadb
     #   google-adk
@@ -400,7 +400,7 @@ watchfiles==1.2.0
     # via uvicorn
 websocket-client==1.9.0
     # via kubernetes
-websockets==15.0.1
+websockets==16.1.1
     # via
     #   google-adk
     #   google-genai
