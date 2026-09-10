@@ -11,25 +11,36 @@ The private key is a separately protected Actions secret — not GITHUB_TOKEN.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import re
 import sys
 from pathlib import Path
+from types import ModuleType
 
 ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
-from deepcatalog.release_trust import (  # noqa: E402
-    DEFAULT_UPDATE_REPO,
-    MANIFEST_NAME,
-    MANIFEST_SIG_NAME,
-    artifact_sha256,
-    build_manifest,
-    canonical_manifest_bytes,
-    encode_signature,
-    sign_manifest,
-)
+
+def _load_release_trust() -> ModuleType:
+    """Load release_trust without importing deepcatalog.config (needs dotenv)."""
+    path = ROOT / "deepcatalog" / "release_trust.py"
+    spec = importlib.util.spec_from_file_location("deepcatalog_release_trust", path)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"could not load {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_trust = _load_release_trust()
+DEFAULT_UPDATE_REPO = _trust.DEFAULT_UPDATE_REPO
+MANIFEST_NAME = _trust.MANIFEST_NAME
+MANIFEST_SIG_NAME = _trust.MANIFEST_SIG_NAME
+artifact_sha256 = _trust.artifact_sha256
+build_manifest = _trust.build_manifest
+canonical_manifest_bytes = _trust.canonical_manifest_bytes
+encode_signature = _trust.encode_signature
+sign_manifest = _trust.sign_manifest
 
 _SHA256_LINE_RE = re.compile(r"^\s*([A-Fa-f0-9]{64})\s+\*?(.+?)\s*$")
 
