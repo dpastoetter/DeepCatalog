@@ -22,6 +22,7 @@ from deepcatalog.ollama_url import (
     apply_openai_compat_env_for_ollama,
     is_loopback_ollama_url,
     ollama_client,
+    public_ollama_config_error,
     trusted_ollama_origin,
 )
 
@@ -197,8 +198,12 @@ def probe_ollama(base_url: str | None = None, *, timeout: float = PROBE_TIMEOUT)
                     result["version"] = (ver_resp.json() or {}).get("version")
             except (httpx.HTTPError, ValueError):
                 pass
-    except httpx.ConnectError:
-        result["error"] = "Cannot reach Ollama — is `ollama serve` running?"
+    except httpx.ConnectError as exc:
+        cause = exc.__cause__
+        if isinstance(cause, ValueError):
+            result["error"] = public_ollama_config_error(cause)
+        else:
+            result["error"] = "Cannot reach Ollama — is `ollama serve` running?"
     except httpx.HTTPError:
         result["error"] = "Ollama returned an HTTP error"
     except ValueError:
@@ -676,9 +681,110 @@ def ollama_status(*, base_url: str | None = None) -> dict[str, Any]:
     }
 
 
+def _host_path_candidates() -> list[Path]:
+    """Well-known install locations for the official Ollama Linux binary."""
+    home = Path.home()
+    return [
+        home / ".local" / "bin" / "ollama",
+        Path("/usr/local/bin/ollama"),
+        Path("/usr/bin/ollama"),
+    ]
+
+
 def find_ollama_binary() -> str | None:
-    """Return the absolute path to the `ollama` CLI if it is on PATH."""
-    return shutil.which("ollama")
+    """Return the absolute path to the `ollama` CLI if installed.
+
+    Desktop AppImage launches often omit ``~/.local/bin`` from PATH (where the
+    official installer places ``ollama``), so we also check well-known paths.
+    """
+    found = shutil.which("ollama")
+    if found:
+        return found
+    for candidate in _host_path_candidates():
+        try:
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate.resolve())
+        except OSError:
+            continue
+    return None
+
+
+def host_subprocess_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """
+    Environment for host tools (ollama, systemctl) launched from an AppImage.
+
+    AppRun puts Ubuntu WebKit libs on ``LD_LIBRARY_PATH``. Spawning the system
+    ``ollama`` binary with that path often fails on Debian/Fedora (wrong
+    libssl/libstdc++). Strip AppImage mount paths and ensure ``~/.local/bin``
+    is searchable.
+    """
+    env = dict(os.environ if base is None else base)
+    appdir = (env.get("APPDIR") or "").rstrip("/")
+    strip_keys = (
+        "LD_PRELOAD",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONNOUSERSITE",
+        "GI_TYPELIB_PATH",
+        "GIO_MODULE_DIR",
+        "GDK_PIXBUF_MODULEDIR",
+        "GDK_PIXBUF_MODULE_FILE",
+        "GSETTINGS_SCHEMA_DIR",
+        "GSETTINGS_BACKEND",
+        "GTK_DATA_PREFIX",
+        "GTK_THEME",
+        "WEBKIT_EXEC_PATH",
+        "WEBKIT_INJECTED_BUNDLE_PATH",
+        "WEBKIT_FORCE_SANDBOX",
+        "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS",
+        "WEBKIT_DISABLE_COMPOSITING_MODE",
+        "WEBKIT_DISABLE_DMABUF_RENDERER",
+    )
+    for key in strip_keys:
+        env.pop(key, None)
+
+    def _keep_path_entry(entry: str) -> bool:
+        if not entry:
+            return False
+        if appdir and (entry == appdir or entry.startswith(appdir + "/")):
+            return False
+        if "deepcatalog-webkit" in entry:
+            return False
+        if "/tmp/.mount_" in entry or entry.startswith("/tmp/.mount"):
+            return False
+        return True
+
+    for path_key in ("LD_LIBRARY_PATH", "PATH", "XDG_DATA_DIRS", "XDG_CONFIG_DIRS"):
+        raw = env.get(path_key, "")
+        if not raw:
+            if path_key == "LD_LIBRARY_PATH":
+                env.pop(path_key, None)
+            continue
+        kept = [part for part in raw.split(":") if _keep_path_entry(part)]
+        if path_key == "LD_LIBRARY_PATH":
+            if kept:
+                env[path_key] = ":".join(kept)
+            else:
+                env.pop(path_key, None)
+        else:
+            env[path_key] = ":".join(kept)
+
+    # Official installer; desktop .desktop launches often omit this directory.
+    home = Path(env.get("HOME") or Path.home()).expanduser()
+    local_bin = str(home / ".local" / "bin")
+    path = env.get("PATH", "")
+    path_parts = [part for part in path.split(":") if part]
+    if local_bin not in path_parts:
+        env["PATH"] = f"{local_bin}:{path}" if path else local_bin
+
+    # Prefer Ollama's own shared libs over any leftover AppImage entries.
+    ollama_lib = home / ".local" / "lib" / "ollama"
+    if ollama_lib.is_dir():
+        existing = env.get("LD_LIBRARY_PATH", "")
+        prefix = str(ollama_lib)
+        env["LD_LIBRARY_PATH"] = f"{prefix}:{existing}" if existing else prefix
+
+    return env
 
 
 def _try_systemctl_start() -> str | None:
@@ -687,6 +793,7 @@ def _try_systemctl_start() -> str | None:
         ["systemctl", "--user", "start", "ollama.service"],
         ["systemctl", "start", "ollama.service"],
     )
+    env = host_subprocess_env()
     for args in candidates:
         try:
             completed = subprocess.run(
@@ -695,6 +802,7 @@ def _try_systemctl_start() -> str | None:
                 text=True,
                 timeout=20,
                 check=False,
+                env=env,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             continue
@@ -710,6 +818,7 @@ def _spawn_ollama_serve(binary: str) -> None:
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
         "start_new_session": True,
+        "env": host_subprocess_env(),
     }
     if os.name == "nt":
         # CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
@@ -906,6 +1015,7 @@ def _try_systemctl_stop() -> str | None:
         ["systemctl", "--user", "stop", "ollama.service"],
         ["systemctl", "stop", "ollama.service"],
     )
+    env = host_subprocess_env()
     for args in candidates:
         try:
             completed = subprocess.run(
@@ -914,6 +1024,7 @@ def _try_systemctl_stop() -> str | None:
                 text=True,
                 timeout=20,
                 check=False,
+                env=env,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             continue
@@ -927,6 +1038,7 @@ def _try_systemctl_restart() -> str | None:
         ["systemctl", "--user", "restart", "ollama.service"],
         ["systemctl", "restart", "ollama.service"],
     )
+    env = host_subprocess_env()
     for args in candidates:
         try:
             completed = subprocess.run(
@@ -935,6 +1047,7 @@ def _try_systemctl_restart() -> str | None:
                 text=True,
                 timeout=30,
                 check=False,
+                env=env,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             continue

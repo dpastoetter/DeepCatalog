@@ -17,7 +17,9 @@ from deepcatalog.ollama_setup import (
     enable_ollama,
     ensure_ollama_ready,
     env_path,
+    find_ollama_binary,
     format_http_error,
+    host_subprocess_env,
     infer_model_processor,
     missing_models,
     model_name_matches,
@@ -522,6 +524,45 @@ def test_start_ollama_requires_binary(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="not installed"):
         start_ollama(wait_timeout=1.0)
+
+
+def test_host_subprocess_env_strips_appimage_libs(tmp_path, monkeypatch):
+    appdir = tmp_path / "squashfs-root"
+    webkit = appdir / "usr" / "lib" / "deepcatalog-webkit"
+    webkit.mkdir(parents=True)
+    home = tmp_path / "home"
+    (home / ".local" / "bin").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    env = host_subprocess_env(
+        {
+            "HOME": str(home),
+            "APPDIR": str(appdir),
+            "LD_LIBRARY_PATH": f"{webkit}:/usr/lib",
+            "PATH": "/usr/bin:/bin",
+            "PYTHONHOME": str(appdir / "usr"),
+            "GI_TYPELIB_PATH": str(appdir / "usr" / "lib" / "girepository-1.0"),
+        }
+    )
+    assert env.get("LD_LIBRARY_PATH") == "/usr/lib"
+    assert "PYTHONHOME" not in env
+    assert "GI_TYPELIB_PATH" not in env
+    assert str(home / ".local" / "bin") in env["PATH"].split(":")
+
+
+def test_find_ollama_binary_checks_local_bin(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    local_bin = home / ".local" / "bin"
+    local_bin.mkdir(parents=True)
+    binary = local_bin / "ollama"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(0o755)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setattr(
+        "deepcatalog.ollama_setup.shutil.which",
+        lambda _name: None,
+    )
+    assert find_ollama_binary() == str(binary.resolve())
 
 
 def test_ollama_start_api(client, monkeypatch):

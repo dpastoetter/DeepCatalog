@@ -14,7 +14,8 @@ export DATA_DIR="${DATA_DIR:-$HOME/.local/share/deepcatalog}"
 export PYTHONNOUSERSITE=1
 export PYTHONPATH="${DEEPCATALOG_PROJECT_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
 
-export PATH="$HERE/usr/bin:${PATH:-}"
+# Official Ollama installs to ~/.local/bin; .desktop launches often omit it.
+export PATH="$HERE/usr/bin:${HOME:+$HOME/.local/bin:}${PATH:-}"
 
 WEBKIT_DIR="$HERE/usr/lib/deepcatalog-webkit"
 if [ -d "$WEBKIT_DIR" ]; then
