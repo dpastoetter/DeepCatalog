@@ -226,7 +226,18 @@ vendor_webkit_stack() {
   echo "Vendoring WebKitGTK from ${webkit_so}"
   mkdir -p "$webkit_dest"
   VENDOR_MODE=webkit
-  vendor_deps "$webkit_so" "$webkit_dest"
+  # vendor_deps only copies NEEDED dependencies, not the seed library itself.
+  webkit_base="$(basename "$webkit_so")"
+  cp -aL "$webkit_so" "$webkit_dest/$webkit_base"
+  case "$webkit_base" in
+    libwebkit2gtk-4.1.so.0.*)
+      cp -aL "$webkit_so" "$webkit_dest/libwebkit2gtk-4.1.so.0"
+      ;;
+    libwebkit2gtk-4.0.so.0.* | libwebkit2gtk-4.0.so.37.*)
+      cp -aL "$webkit_so" "$webkit_dest/libwebkit2gtk-4.0.so.0"
+      ;;
+  esac
+  vendor_deps "$webkit_dest/$webkit_base" "$webkit_dest"
 
   bundled_webkit=""
   for candidate in "$webkit_dest"/libwebkit2gtk-4.1.so* "$webkit_dest"/libwebkit2gtk-4.0.so*; do
