@@ -173,6 +173,10 @@ vendor_deps() {
         *" $base "*) continue ;;
       esac
       seen+=" $base"
+      # Do not clobber a previously vendored (and possibly relocated) copy.
+      if [ -e "$dest/$base" ]; then
+        continue
+      fi
       cp -aL "$lib" "$dest/$base"
       pending+=("$dest/$base")
     done < <(ldd "$item" 2>/dev/null | awk '/=> \/|=> \.\// {print $3} /^\// {print $1}')
@@ -245,11 +249,6 @@ vendor_webkit_stack() {
     break
   done
   [ -n "$bundled_webkit" ] || die "vendored libwebkit2gtk missing from ${webkit_dest}"
-  # Patch every bundled WebKit soname copy (helpers may pull another basename).
-  for candidate in "$webkit_dest"/libwebkit2gtk-4.1.so* "$webkit_dest"/libwebkit2gtk-4.0.so*; do
-    [ -f "$candidate" ] || continue
-    python3 "$ROOT/scripts/relocate-webkit.py" "$candidate"
-  done
 
   libdir="$(dirname "$webkit_so")"
   helper_src=""
@@ -385,6 +384,10 @@ EOF
       patchelf --set-rpath "\$ORIGIN/../../../deepcatalog-webkit" "$gi_so" 2>/dev/null || true
     fi
   done
+
+  # Relocate after every vendor_deps pass so helpers cannot overwrite with the
+  # host libwebkit (compile-time /usr/lib/.../webkit2gtk-* paths).
+  python3 "$ROOT/scripts/relocate-webkit.py" "$webkit_dest/$webkit_name"
   VENDOR_MODE=poppler
 }
 
