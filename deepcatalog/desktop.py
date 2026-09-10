@@ -759,12 +759,14 @@ def desktop_prefers_dark() -> bool:
 
 
 def _apply_gtk_wm_class() -> None:
-    """Set WM_CLASS before Gtk.Application starts.
+    """Set WM_CLASS and Adwaita dark preference before Gtk.Application starts.
 
     Optional host GI (PyGObject); not bundled in the AppImage Python.
+    AppRun already sets GTK_THEME / private settings.ini; this reinforces
+    prefer-dark on Gtk.Settings when GSETTINGS_BACKEND=memory hides dconf.
     """
     try:
-        from gi.repository import GLib
+        from gi.repository import GLib, Gtk
     except ImportError:
         return
     try:
@@ -772,6 +774,18 @@ def _apply_gtk_wm_class() -> None:
         GLib.set_application_name("DeepCatalog Studio")
     except Exception as exc:  # noqa: BLE001 — GI bindings vary by distro
         logger.debug("Could not set GTK application id: %s", exc)
+    try:
+        settings = Gtk.Settings.get_default()
+        if settings is None:
+            return
+        dark = desktop_prefers_dark()
+        # Prefer the :dark variant explicitly — GTK_THEME=Adwaita alone ignores
+        # gtk-application-prefer-dark-theme for CSD chrome.
+        settings.set_property("gtk-theme-name", "Adwaita:dark" if dark else "Adwaita")
+        settings.set_property("gtk-application-prefer-dark-theme", dark)
+        settings.set_property("gtk-decoration-layout", ":minimize,maximize,close")
+    except Exception as exc:  # noqa: BLE001 — GI bindings vary by distro
+        logger.debug("Could not apply GTK dark preference: %s", exc)
 
 
 def _apply_window_icon(window: object, icon: Path | None) -> None:

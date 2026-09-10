@@ -229,9 +229,31 @@ def pin_tcp_host(host: str) -> str:
     return str(chosen)
 
 
+def _peer_address_from_stream(stream: Any) -> Any:
+    """
+    Remote peer from an httpcore network stream.
+
+    httpcore SyncStream/AnyIOStream expose ``server_addr`` (and ``socket``), not
+    asyncio's ``peername``. Prefer those so a successful connect is not rejected.
+    """
+    if not hasattr(stream, "get_extra_info"):
+        return None
+    for key in ("server_addr", "peername"):
+        extra = stream.get_extra_info(key)
+        if extra is not None:
+            return extra
+    sock = stream.get_extra_info("socket")
+    if sock is not None and hasattr(sock, "getpeername"):
+        try:
+            return sock.getpeername()
+        except OSError:
+            return None
+    return None
+
+
 def verify_connected_peer(stream: Any) -> None:
     """Fail closed if the connected socket peer is a blocked address."""
-    extra = stream.get_extra_info("peername") if hasattr(stream, "get_extra_info") else None
+    extra = _peer_address_from_stream(stream)
     if extra is None:
         raise ValueError("Ollama connection did not expose a peer address")
     addr = extra[0] if isinstance(extra, (tuple, list)) else extra

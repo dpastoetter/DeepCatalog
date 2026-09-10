@@ -320,6 +320,47 @@ def test_desktop_prefers_dark_reads_env(monkeypatch):
     assert desktop_prefers_dark() is True
 
 
+def test_apply_gtk_wm_class_sets_dark_theme(monkeypatch):
+    props: dict[str, object] = {}
+
+    class FakeSettings:
+        def set_property(self, name: str, value: object) -> None:
+            props[name] = value
+
+    class FakeGtk:
+        class Settings:
+            @staticmethod
+            def get_default():
+                return FakeSettings()
+
+    class FakeGLib:
+        @staticmethod
+        def set_prgname(_name: str) -> None:
+            return None
+
+        @staticmethod
+        def set_application_name(_name: str) -> None:
+            return None
+
+    import sys
+    from types import ModuleType
+
+    gi = ModuleType("gi")
+    repository = ModuleType("gi.repository")
+    repository.GLib = FakeGLib
+    repository.Gtk = FakeGtk
+    gi.repository = repository
+    monkeypatch.setitem(sys.modules, "gi", gi)
+    monkeypatch.setitem(sys.modules, "gi.repository", repository)
+    monkeypatch.setenv("DEEPCATALOG_GTK_DARK", "1")
+    from deepcatalog.desktop import _apply_gtk_wm_class
+
+    _apply_gtk_wm_class()
+    assert props["gtk-theme-name"] == "Adwaita:dark"
+    assert props["gtk-application-prefer-dark-theme"] is True
+    assert props["gtk-decoration-layout"] == ":minimize,maximize,close"
+
+
 def test_configure_webview_runtime_env_sets_webkit_defaults(monkeypatch):
     monkeypatch.setattr("deepcatalog.desktop.sys.platform", "linux")
     monkeypatch.delenv("WEBKIT_FORCE_SANDBOX", raising=False)

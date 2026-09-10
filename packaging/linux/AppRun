@@ -55,9 +55,15 @@ export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"
 if [ -z "${DEEPCATALOG_GTK_DARK:-}" ]; then
   scheme=""
   gtk_th=""
-  if command -v gsettings >/dev/null 2>&1; then
-    scheme=$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null || true)
-    gtk_th=$(gsettings get org.gnome.desktop.interface gtk-theme 2>/dev/null || true)
+  gsettings_bin=""
+  if [ -x /usr/bin/gsettings ]; then
+    gsettings_bin=/usr/bin/gsettings
+  elif command -v gsettings >/dev/null 2>&1; then
+    gsettings_bin="$(command -v gsettings)"
+  fi
+  if [ -n "$gsettings_bin" ]; then
+    scheme=$("$gsettings_bin" get org.gnome.desktop.interface color-scheme 2>/dev/null || true)
+    gtk_th=$("$gsettings_bin" get org.gnome.desktop.interface gtk-theme 2>/dev/null || true)
   fi
   case "$scheme" in
     *prefer-dark*) export DEEPCATALOG_GTK_DARK=1 ;;
@@ -72,9 +78,26 @@ if [ -z "${DEEPCATALOG_GTK_DARK:-}" ]; then
 fi
 if [ "${DEEPCATALOG_GTK_DARK:-0}" = "1" ]; then
   export GTK_THEME="${GTK_THEME:-Adwaita:dark}"
+  gtk_prefer_dark=true
 else
   export GTK_THEME="${GTK_THEME:-Adwaita}"
+  gtk_prefer_dark=false
 fi
+
+# Private GTK config so host ~/.config/gtk-3.0 cannot force a light theme over
+# Adwaita:dark, and prefer-dark matches the probed GNOME color-scheme.
+gtk_conf="${XDG_CACHE_HOME:-$HOME/.cache}/deepcatalog/gtk-config"
+mkdir -p "$gtk_conf/gtk-3.0"
+cat > "$gtk_conf/gtk-3.0/settings.ini" <<EOF
+[Settings]
+gtk-theme-name=Adwaita
+gtk-icon-theme-name=Adwaita
+gtk-cursor-theme-name=Adwaita
+gtk-font-name=Sans 11
+gtk-decoration-layout=:minimize,maximize,close
+gtk-application-prefer-dark-theme=${gtk_prefer_dark}
+EOF
+export XDG_CONFIG_HOME="$gtk_conf"
 
 # Bundled GTK must use the Ubuntu Adwaita copied at pack time — host GTK CSS
 # (Fedora 42+) is newer than the builder's GTK 3.24 and leaves CSD buttons blank.

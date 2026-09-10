@@ -154,6 +154,38 @@ def resolve_runtime_model(wanted: str, *, base_url: str | None = None) -> str:
     return resolve_installed_model(wanted, installed) or (wanted or "").strip()
 
 
+def _connect_error_validation_message(exc: BaseException) -> str | None:
+    """
+    Map DNS-pin / peer-validation failures that were remapped to ConnectError.
+
+    httpcore often does ``raise ConnectError(...) from None``, so ``__cause__``
+    may be missing; walk the chain and inspect the message text.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ValueError):
+            return public_ollama_config_error(current)
+        raw = str(current)
+        if any(
+            token in raw
+            for token in (
+                "blocked address",
+                "link-local",
+                "non-loopback",
+                "not allowed",
+                "allowlist",
+                "ALLOWED_HOSTS",
+                "did not expose a peer",
+                "peer is not an IP",
+            )
+        ):
+            return public_ollama_config_error(ValueError(raw))
+        current = current.__cause__ or current.__context__
+    return None
+
+
 def probe_ollama(base_url: str | None = None, *, timeout: float = PROBE_TIMEOUT) -> dict[str, Any]:
     """
     Probe an Ollama server.
@@ -199,11 +231,8 @@ def probe_ollama(base_url: str | None = None, *, timeout: float = PROBE_TIMEOUT)
             except (httpx.HTTPError, ValueError):
                 pass
     except httpx.ConnectError as exc:
-        cause = exc.__cause__
-        if isinstance(cause, ValueError):
-            result["error"] = public_ollama_config_error(cause)
-        else:
-            result["error"] = "Cannot reach Ollama — is `ollama serve` running?"
+        validation = _connect_error_validation_message(exc)
+        result["error"] = validation or "Cannot reach Ollama — is `ollama serve` running?"
     except httpx.HTTPError:
         result["error"] = "Ollama returned an HTTP error"
     except ValueError:

@@ -149,18 +149,49 @@ def test_verify_connected_peer_rejects_link_local():
     class FakeStream:
         @staticmethod
         def get_extra_info(name: str):
-            assert name == "peername"
+            assert name == "server_addr"
             return ("169.254.169.254", 80)
 
     with pytest.raises(ValueError, match="blocked"):
         verify_connected_peer(FakeStream())
 
 
+def test_verify_connected_peer_uses_httpcore_server_addr():
+    class FakeStream:
+        @staticmethod
+        def get_extra_info(name: str):
+            if name == "peername":
+                return None
+            if name == "server_addr":
+                return ("127.0.0.1", 11434)
+            return None
+
+    verify_connected_peer(FakeStream())
+
+
+def test_verify_connected_peer_falls_back_to_socket():
+    class FakeSock:
+        @staticmethod
+        def getpeername():
+            return ("127.0.0.1", 11434)
+
+    class FakeStream:
+        @staticmethod
+        def get_extra_info(name: str):
+            if name == "socket":
+                return FakeSock()
+            return None
+
+    verify_connected_peer(FakeStream())
+
+
 def test_verify_connected_peer_unwraps_ipv4_mapped():
     class FakeStream:
         @staticmethod
         def get_extra_info(name: str):
-            return ("::ffff:169.254.169.254", 80)
+            if name == "server_addr":
+                return ("::ffff:169.254.169.254", 80)
+            return None
 
     with pytest.raises(ValueError, match="blocked"):
         verify_connected_peer(FakeStream())
