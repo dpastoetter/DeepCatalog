@@ -227,17 +227,16 @@ vendor_webkit_stack() {
   mkdir -p "$webkit_dest"
   VENDOR_MODE=webkit
   # vendor_deps only copies NEEDED dependencies, not the seed library itself.
+  # Store under the ABI soname loaders expect (…so.0), not the fully versioned
+  # realpath (…so.0.19.7), so relocate-webkit patches the file that is loaded.
   webkit_base="$(basename "$webkit_so")"
-  cp -aL "$webkit_so" "$webkit_dest/$webkit_base"
   case "$webkit_base" in
-    libwebkit2gtk-4.1.so.0.*)
-      cp -aL "$webkit_so" "$webkit_dest/libwebkit2gtk-4.1.so.0"
-      ;;
-    libwebkit2gtk-4.0.so.0.* | libwebkit2gtk-4.0.so.37.*)
-      cp -aL "$webkit_so" "$webkit_dest/libwebkit2gtk-4.0.so.0"
-      ;;
+    libwebkit2gtk-4.1.so.0.*) webkit_name="libwebkit2gtk-4.1.so.0" ;;
+    libwebkit2gtk-4.0.so.0.* | libwebkit2gtk-4.0.so.37.*) webkit_name="libwebkit2gtk-4.0.so.0" ;;
+    *) webkit_name="$webkit_base" ;;
   esac
-  vendor_deps "$webkit_dest/$webkit_base" "$webkit_dest"
+  cp -aL "$webkit_so" "$webkit_dest/$webkit_name"
+  vendor_deps "$webkit_dest/$webkit_name" "$webkit_dest"
 
   bundled_webkit=""
   for candidate in "$webkit_dest"/libwebkit2gtk-4.1.so* "$webkit_dest"/libwebkit2gtk-4.0.so*; do
@@ -246,7 +245,11 @@ vendor_webkit_stack() {
     break
   done
   [ -n "$bundled_webkit" ] || die "vendored libwebkit2gtk missing from ${webkit_dest}"
-  python3 "$ROOT/scripts/relocate-webkit.py" "$bundled_webkit"
+  # Patch every bundled WebKit soname copy (helpers may pull another basename).
+  for candidate in "$webkit_dest"/libwebkit2gtk-4.1.so* "$webkit_dest"/libwebkit2gtk-4.0.so*; do
+    [ -f "$candidate" ] || continue
+    python3 "$ROOT/scripts/relocate-webkit.py" "$candidate"
+  done
 
   libdir="$(dirname "$webkit_so")"
   helper_src=""
@@ -574,11 +577,15 @@ root = Path(sys.argv[1])
 libs = list((root / "usr/lib/deepcatalog-webkit").glob("libwebkit2gtk-4.*.so*"))
 if not libs:
     raise SystemExit("extracted AppImage is missing libwebkit2gtk")
-blob = libs[0].read_bytes()
-if b"/tmp/.dc/x86_64-linux-gnu/webkit2gtk-4." not in blob:
+relocated = False
+for lib in libs:
+    blob = lib.read_bytes()
+    if b"/usr/lib/x86_64-linux-gnu/webkit2gtk-4." in blob:
+        raise SystemExit(f"{lib.name} still contains the Ubuntu libexec path")
+    if b"/tmp/.dc/x86_64-linux-gnu/webkit2gtk-4." in blob:
+        relocated = True
+if not relocated:
     raise SystemExit("libwebkit2gtk was not relocated to /tmp/.dc libexec")
-if b"/usr/lib/x86_64-linux-gnu/webkit2gtk-4." in blob:
-    raise SystemExit("libwebkit2gtk still contains the Ubuntu libexec path")
 print("webkit-libexec-ok")
 PY
 "$SMOKE/AppRun" --help >/dev/null
