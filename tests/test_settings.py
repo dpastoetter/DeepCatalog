@@ -100,10 +100,10 @@ def test_settings_api_poll_interval_and_process_all(isolated_settings, monkeypat
     for name in ("a.pdf", "b.pdf", "c.pdf"):
         (custom_inbox / name).write_bytes(b"%PDF-1.4 stub")
 
-    from app.main import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
+    from tests.conftest import apply_test_client_auth
 
     client = TestClient(app)
-    client.headers.update({CSRF_HEADER_NAME: CSRF_HEADER_VALUE})
+    apply_test_client_auth(client)
     put = client.put(
         "/api/settings",
         json={
@@ -217,10 +217,10 @@ def test_load_settings_keeps_require_approval_false_when_ocr_missing(
 
 
 def test_put_require_approval_false_persists_to_disk(isolated_settings):
-    from app.main import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
+    from tests.conftest import apply_test_client_auth
 
     client = TestClient(app)
-    client.headers.update({CSRF_HEADER_NAME: CSRF_HEADER_VALUE})
+    apply_test_client_auth(client)
     settings = client.get("/api/settings").json()["settings"]
     settings["review"]["require_approval"] = False
     resp = client.put("/api/settings", json=settings)

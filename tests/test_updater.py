@@ -8,14 +8,24 @@ import tarfile
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import deepcatalog
 from app.main import app
+from deepcatalog.release_trust import (
+    MANIFEST_NAME,
+    MANIFEST_SIG_NAME,
+    build_manifest,
+    canonical_manifest_bytes,
+    encode_signature,
+    sign_manifest,
+)
 from deepcatalog.updater import (
     _github_get,
     _pick_appimage_asset,
     apply_tarball,
     apply_update,
+    check_for_update,
     is_newer,
     parse_sha256sums,
     parse_version,
@@ -235,6 +245,7 @@ def test_apply_update_refuses_unverified_release(monkeypatch):
             "latest_version": "9.9.9",
             "update_available": True,
             "verifiable": False,
+            "signed": False,
             "verification_error": "missing SHA-256",
         },
     )
@@ -253,6 +264,8 @@ def test_apply_update_refuses_checksum_mismatch(isolated_root, monkeypatch):
             "latest_version": "9.9.9",
             "update_available": True,
             "verifiable": True,
+            "signed": True,
+            "manifest_commit": "a" * 40,
             "download_url": "https://example.invalid/deepcatalog-9.9.9.tar.gz",
             "expected_sha256": "0" * 64,
             "artifact_name": "deepcatalog-9.9.9.tar.gz",
@@ -265,9 +278,33 @@ def test_apply_update_refuses_checksum_mismatch(isolated_root, monkeypatch):
     assert not (isolated_root / "pyproject.toml").exists()
 
 
+def test_apply_update_refuses_unsigned_even_with_checksum(monkeypatch):
+    monkeypatch.setattr(
+        "deepcatalog.updater.check_for_update",
+        lambda: {
+            "status": "success",
+            "current_version": "0.1.0",
+            "latest_version": "9.9.9",
+            "update_available": True,
+            "verifiable": True,
+            "signed": False,
+            "download_url": "https://example.invalid/deepcatalog-9.9.9.tar.gz",
+            "expected_sha256": "a" * 64,
+            "verification_error": None,
+        },
+    )
+    result = apply_update()
+    assert result["status"] == "error"
+    assert "unsigned" in result["error"].lower()
+
+
 def test_apply_update_installs_verified_release(isolated_root, monkeypatch):
+    commit = "a" * 40
     tarball = _make_tarball(
-        {"pyproject.toml": b'[project]\nversion = "9.9.9"\n'},
+        {
+            "pyproject.toml": b'[project]\nversion = "9.9.9"\n',
+            ".release-commit": f"commit={commit}\n".encode(),
+        },
         root="deepcatalog-9.9.9",
     )
     digest = hashlib.sha256(tarball).hexdigest()
@@ -279,15 +316,15 @@ def test_apply_update_installs_verified_release(isolated_root, monkeypatch):
             "latest_version": "9.9.9",
             "update_available": True,
             "verifiable": True,
+            "signed": True,
+            "manifest_commit": commit,
             "download_url": (
                 "https://github.com/dpastoetter/DeepCatalog/releases/download/"
                 "v9.9.9/deepcatalog-9.9.9.tar.gz"
             ),
             "expected_sha256": digest,
             "artifact_name": "deepcatalog-9.9.9.tar.gz",
-            # Commit SHA is present for the release tag, but versioned archive
-            # roots must still install after checksum verification.
-            "commit_sha": "a" * 40,
+            "commit_sha": commit,
         },
     )
     monkeypatch.setattr("deepcatalog.updater._download_bytes", lambda _url: tarball)
@@ -296,7 +333,238 @@ def test_apply_update_installs_verified_release(isolated_root, monkeypatch):
     assert result["restart_required"] is True
     assert result["installed_version"] == "9.9.9"
     assert result["verified_sha256"] == digest
+    assert result["verified_commit"] == commit
     assert (isolated_root / "pyproject.toml").exists()
+
+
+def test_apply_tarball_rejects_signed_commit_mismatch(isolated_root):
+    tarball = _make_tarball(
+        {
+            "pyproject.toml": b"version=1\n",
+            ".release-commit": b"commit=" + (b"a" * 40) + b"\n",
+        }
+    )
+    result = apply_tarball(tarball, expected_release_commit="b" * 40)
+    assert result["status"] == "error"
+    assert "release-commit" in result["error"]
+
+
+def test_fetch_unsigned_release_is_not_verifiable(monkeypatch):
+
+    class Fake:
+        def __init__(self, status_code, json_data=None, content=b"", text=""):
+            self.status_code = status_code
+            self._json = json_data
+            self.content = content
+            self.text = text
+            self.is_success = 200 <= status_code < 300
+            self.headers = {}
+
+        def json(self):
+            return self._json
+
+        def raise_for_status(self):
+            if not self.is_success:
+                raise httpx.HTTPStatusError(
+                    "err",
+                    request=httpx.Request("GET", "https://x"),
+                    response=httpx.Response(self.status_code),
+                )
+
+    def handler(_client, url, *, headers=None, params=None):
+        if url.endswith("/releases/latest"):
+            return Fake(
+                200,
+                {
+                    "tag_name": "v9.9.9",
+                    "name": "v9.9.9",
+                    "body": "",
+                    "published_at": None,
+                    "html_url": "https://github.com/dpastoetter/DeepCatalog/releases/tag/v9.9.9",
+                    "tarball_url": "https://api.github.com/repos/dpastoetter/DeepCatalog/tarball/v9.9.9",
+                    "assets": [
+                        {
+                            "name": "deepcatalog-9.9.9.tar.gz",
+                            "browser_download_url": "https://example.invalid/deepcatalog-9.9.9.tar.gz",
+                        },
+                        {
+                            "name": "SHA256SUMS",
+                            "browser_download_url": "https://example.invalid/SHA256SUMS",
+                        },
+                    ],
+                },
+            )
+        if "/commits/" in url:
+            return Fake(200, {"sha": "a" * 40})
+        if url.endswith("/SHA256SUMS"):
+            return Fake(200, text=("b" * 64) + "  deepcatalog-9.9.9.tar.gz\n")
+        return Fake(404)
+
+    monkeypatch.setattr("deepcatalog.updater._github_get", handler)
+    info = check_for_update()
+    assert info["status"] == "success"
+    assert info["signed"] is False
+    assert info["verifiable"] is False
+    assert "signed" in (info.get("verification_error") or "").lower()
+
+
+def test_fetch_signed_release_is_installable(monkeypatch):
+    private = Ed25519PrivateKey.generate()
+    pub = private.public_key().public_bytes_raw().hex()
+    priv = private.private_bytes_raw().hex()
+    monkeypatch.setattr("deepcatalog.release_trust.RELEASE_VERIFY_KEY_HEX", pub)
+    commit = "a" * 40
+    digest = "b" * 64
+    manifest = build_manifest(
+        repo="dpastoetter/DeepCatalog",
+        tag="v9.9.9",
+        commit=commit,
+        artifacts=[{"name": "deepcatalog-9.9.9.tar.gz", "sha256": digest}],
+    )
+    manifest_bytes = canonical_manifest_bytes(manifest)
+    sig_text = encode_signature(sign_manifest(manifest, priv))
+
+    class Fake:
+        def __init__(self, status_code, json_data=None, content=b"", text=""):
+            self.status_code = status_code
+            self._json = json_data
+            self.content = content
+            self.text = text
+            self.is_success = 200 <= status_code < 300
+            self.headers = {}
+
+        def json(self):
+            return self._json
+
+        def raise_for_status(self):
+            if not self.is_success:
+                raise httpx.HTTPStatusError(
+                    "err",
+                    request=httpx.Request("GET", "https://x"),
+                    response=httpx.Response(self.status_code),
+                )
+
+    def handler(_client, url, *, headers=None, params=None):
+        if url.endswith("/releases/latest"):
+            return Fake(
+                200,
+                {
+                    "tag_name": "v9.9.9",
+                    "name": "v9.9.9",
+                    "body": "notes",
+                    "published_at": "2026-01-01T00:00:00Z",
+                    "html_url": "https://github.com/dpastoetter/DeepCatalog/releases/tag/v9.9.9",
+                    "tarball_url": "https://api.github.com/repos/dpastoetter/DeepCatalog/tarball/v9.9.9",
+                    "assets": [
+                        {
+                            "name": "deepcatalog-9.9.9.tar.gz",
+                            "browser_download_url": "https://example.invalid/deepcatalog-9.9.9.tar.gz",
+                        },
+                        {
+                            "name": MANIFEST_NAME,
+                            "browser_download_url": "https://example.invalid/release-manifest.json",
+                        },
+                        {
+                            "name": MANIFEST_SIG_NAME,
+                            "browser_download_url": "https://example.invalid/release-manifest.json.sig",
+                        },
+                    ],
+                },
+            )
+        if "/commits/" in url:
+            return Fake(200, {"sha": commit})
+        if url.endswith("/release-manifest.json"):
+            return Fake(200, content=manifest_bytes)
+        if url.endswith("/release-manifest.json.sig"):
+            return Fake(200, content=sig_text.encode("ascii"))
+        return Fake(404)
+
+    monkeypatch.setattr("deepcatalog.updater._github_get", handler)
+    monkeypatch.setenv("DEEPCATALOG_UPDATE_REPO", "evil/other")
+    info = check_for_update()
+    assert info["status"] == "success"
+    assert info["repo"] == "dpastoetter/DeepCatalog"
+    assert info["signed"] is True
+    assert info["verifiable"] is True
+    assert info["expected_sha256"] == digest
+    assert info["manifest_commit"] == commit
+    assert info["artifact_name"] == "deepcatalog-9.9.9.tar.gz"
+
+
+def test_fetch_rejects_manifest_commit_mismatch(monkeypatch):
+    private = Ed25519PrivateKey.generate()
+    pub = private.public_key().public_bytes_raw().hex()
+    priv = private.private_bytes_raw().hex()
+    monkeypatch.setattr("deepcatalog.release_trust.RELEASE_VERIFY_KEY_HEX", pub)
+    manifest = build_manifest(
+        repo="dpastoetter/DeepCatalog",
+        tag="v9.9.9",
+        commit="a" * 40,
+        artifacts=[{"name": "deepcatalog-9.9.9.tar.gz", "sha256": "b" * 64}],
+    )
+    manifest_bytes = canonical_manifest_bytes(manifest)
+    sig_text = encode_signature(sign_manifest(manifest, priv))
+
+    class Fake:
+        def __init__(self, status_code, json_data=None, content=b"", text=""):
+            self.status_code = status_code
+            self._json = json_data
+            self.content = content
+            self.text = text
+            self.is_success = 200 <= status_code < 300
+            self.headers = {}
+
+        def json(self):
+            return self._json
+
+        def raise_for_status(self):
+            if not self.is_success:
+                raise httpx.HTTPStatusError(
+                    "err",
+                    request=httpx.Request("GET", "https://x"),
+                    response=httpx.Response(self.status_code),
+                )
+
+    def handler(_client, url, *, headers=None, params=None):
+        if url.endswith("/releases/latest"):
+            return Fake(
+                200,
+                {
+                    "tag_name": "v9.9.9",
+                    "name": "v9.9.9",
+                    "body": "",
+                    "published_at": None,
+                    "html_url": "https://github.com/dpastoetter/DeepCatalog/releases/tag/v9.9.9",
+                    "tarball_url": "https://api.github.com/repos/dpastoetter/DeepCatalog/tarball/v9.9.9",
+                    "assets": [
+                        {
+                            "name": "deepcatalog-9.9.9.tar.gz",
+                            "browser_download_url": "https://example.invalid/deepcatalog-9.9.9.tar.gz",
+                        },
+                        {
+                            "name": MANIFEST_NAME,
+                            "browser_download_url": "https://example.invalid/release-manifest.json",
+                        },
+                        {
+                            "name": MANIFEST_SIG_NAME,
+                            "browser_download_url": "https://example.invalid/release-manifest.json.sig",
+                        },
+                    ],
+                },
+            )
+        if "/commits/" in url:
+            return Fake(200, {"sha": "c" * 40})
+        if url.endswith("/release-manifest.json"):
+            return Fake(200, content=manifest_bytes)
+        if url.endswith("/release-manifest.json.sig"):
+            return Fake(200, content=sig_text.encode("ascii"))
+        return Fake(404)
+
+    monkeypatch.setattr("deepcatalog.updater._github_get", handler)
+    info = check_for_update()
+    assert info["signed"] is False
+    assert info["verifiable"] is False
+    assert "commit" in (info.get("verification_error") or "").lower()
 
 
 def test_pick_appimage_prefers_x86_64():

@@ -36,8 +36,17 @@ AUTH_EXEMPT_PATHS = frozenset(
         "/api/auth/session/logout",
     }
 )
+# One-time desktop nonce lives in the path; never require a session to consume it.
+AUTH_EXEMPT_PREFIXES = ("/api/auth/desktop-bootstrap/",)
 
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # generous cap for large scans
+
+
+def path_is_auth_exempt(path: str) -> bool:
+    """True for liveness and session/desktop bootstrap routes."""
+    if path in AUTH_EXEMPT_PATHS:
+        return True
+    return any(path.startswith(prefix) for prefix in AUTH_EXEMPT_PREFIXES)
 
 
 def origin_matches_host_header(origin: str, host_header: str | None) -> bool:

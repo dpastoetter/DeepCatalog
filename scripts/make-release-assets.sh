@@ -146,6 +146,8 @@ REQUIRED_PATHS=(
   "deepcatalog/ocr.py"
   "deepcatalog/system_service.py"
   "deepcatalog/updater.py"
+  "deepcatalog/release_trust.py"
+  "scripts/sign-release-manifest.py"
   "packaging/linux/AppRun"
   "packaging/linux/deepcatalog.desktop"
   "packaging/linux/deepcatalog.svg"
@@ -189,4 +191,4 @@ echo "  tracked files packed: ${EXPECTED_COUNT} (+ .release-commit + .release-fi
 cat "$DIST/SHA256SUMS"
 echo
 echo "Upload these files to the GitHub release for $TAG."
-echo "The in-app updater requires the .tar.gz + SHA256SUMS."
+echo "CI signs dist/SHA256SUMS into release-manifest.json after this script (and AppImage checksums)."

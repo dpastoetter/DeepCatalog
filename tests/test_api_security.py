@@ -9,6 +9,7 @@ from app.main import CSRF_HEADER_NAME, CSRF_HEADER_VALUE, app
 from deepcatalog.local_security import (
     COOKIE_NAME,
     assert_bind_allowed,
+    auth_required_for_request,
     forwarded_client_host,
     generate_api_token,
     is_direct_loopback_request,
@@ -34,6 +35,20 @@ def test_loopback_bind_helpers():
     assert is_wildcard_or_non_loopback_bind("10.0.0.1")
     assert not is_wildcard_or_non_loopback_bind("127.0.0.1")
     assert not is_wildcard_or_non_loopback_bind("localhost")
+
+
+def test_loopback_is_not_an_auth_boundary(monkeypatch):
+    monkeypatch.delenv("DEEPCATALOG_SINGLE_USER", raising=False)
+    assert auth_required_for_request(peer_host="127.0.0.1", host_header="localhost") is True
+    assert auth_required_for_request(peer_host="testclient", host_header="testserver") is True
+
+
+def test_single_user_mode_exempts_direct_loopback_only(monkeypatch):
+    monkeypatch.setenv("DEEPCATALOG_SINGLE_USER", "1")
+    assert auth_required_for_request(peer_host="127.0.0.1", host_header="localhost") is False
+    assert auth_required_for_request(peer_host="203.0.113.9", host_header="localhost") is True
+    monkeypatch.setenv("DEEPCATALOG_TRUSTED_PROXIES", "127.0.0.1")
+    assert auth_required_for_request(peer_host="127.0.0.1", host_header="localhost") is True
 
 
 def test_assert_bind_requires_remote_opt_in_token_and_tls(tmp_path, monkeypatch):
@@ -173,9 +188,22 @@ def test_diagnostics_requires_bearer_when_token_set(isolated_data, monkeypatch):
     assert "llm_provider" in body
 
 
-def test_index_sets_random_session_cookie_on_loopback(isolated_data, monkeypatch):
+def test_index_does_not_auto_login_loopback(isolated_data, monkeypatch):
     token = generate_api_token()
     monkeypatch.setenv("DEEPCATALOG_API_TOKEN", token)
+    clear_all_sessions()
+    client = TestClient(app)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert COOKIE_NAME not in resp.cookies
+    assert "PA_API_TOKEN" not in resp.text
+    assert client.get("/api/inbox").status_code == 401
+
+
+def test_single_user_mode_sets_session_cookie_on_loopback(isolated_data, monkeypatch):
+    token = generate_api_token()
+    monkeypatch.setenv("DEEPCATALOG_API_TOKEN", token)
+    monkeypatch.setenv("DEEPCATALOG_SINGLE_USER", "1")
     clear_all_sessions()
     client = TestClient(app)
     resp = client.get("/")
@@ -184,7 +212,6 @@ def test_index_sets_random_session_cookie_on_loopback(isolated_data, monkeypatch
     cookie = resp.cookies.get(COOKIE_NAME)
     assert cookie
     assert cookie != token
-    assert "PA_API_TOKEN" not in resp.text
     assert session_is_valid(cookie)
 
 
@@ -217,10 +244,8 @@ def test_loopback_query_token_does_not_authenticate(isolated_data, monkeypatch):
     assert client.get(f"/api/inbox?token={token}").status_code == 401
     resp = client.get(f"/?token={token}")
     assert resp.status_code == 200
-    cookie = resp.cookies.get(COOKIE_NAME)
-    assert cookie
-    assert cookie != token
-    assert session_is_valid(cookie)
+    assert not resp.cookies.get(COOKIE_NAME)
+    assert client.get("/api/inbox").status_code == 401
 
 
 def test_forwarded_headers_only_from_trusted_proxies(monkeypatch):
@@ -462,10 +487,11 @@ def test_spoofed_forwarded_proto_does_not_issue_session(isolated_data, monkeypat
 
 
 def test_spoofed_xff_does_not_skip_auth_without_token(isolated_data, monkeypatch):
-    monkeypatch.delenv("DEEPCATALOG_API_TOKEN", raising=False)
     monkeypatch.setenv("DEEPCATALOG_TRUSTED_PROXIES", "127.0.0.1")
     monkeypatch.setenv("DEEPCATALOG_ALLOWED_HOSTS", "deepcatalog.example.com")
     client = TestClient(app, client=("127.0.0.1", 50000))
+    # After lifespan (which would generate a token) drop it so the request is unauthenticated.
+    monkeypatch.delenv("DEEPCATALOG_API_TOKEN", raising=False)
     resp = client.get(
         "/api/inbox",
         headers={"Host": "deepcatalog.example.com", "X-Forwarded-For": "127.0.0.2"},
@@ -535,3 +561,49 @@ def test_remote_credentials_require_https(isolated_data, monkeypatch):
     missing = no_cred.get("/api/inbox")
     assert missing.status_code == 401
     assert "HTTPS" not in missing.json()["detail"]
+
+
+def test_desktop_bootstrap_sets_session_on_loopback(isolated_data, monkeypatch):
+    from deepcatalog.desktop_bootstrap import clear_desktop_bootstrap, mint_desktop_bootstrap
+
+    token = generate_api_token()
+    monkeypatch.setenv("DEEPCATALOG_API_TOKEN", token)
+    clear_all_sessions()
+    clear_desktop_bootstrap()
+    nonce = mint_desktop_bootstrap()
+    client = TestClient(app)
+    resp = client.get(f"/api/auth/desktop-bootstrap/{nonce}?desktop=1", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/?desktop=1"
+    cookie = resp.cookies.get(COOKIE_NAME)
+    assert cookie
+    assert cookie != token
+    assert session_is_valid(cookie)
+    authed = TestClient(app)
+    authed.cookies.set(COOKIE_NAME, cookie)
+    assert authed.get("/api/inbox").status_code == 200
+    # Single-use.
+    replay = client.get(f"/api/auth/desktop-bootstrap/{nonce}", follow_redirects=False)
+    assert replay.status_code == 401
+
+
+def test_desktop_bootstrap_rejects_non_loopback(isolated_data, monkeypatch):
+    from deepcatalog.desktop_bootstrap import clear_desktop_bootstrap, mint_desktop_bootstrap
+
+    monkeypatch.setenv("DEEPCATALOG_ALLOWED_HOSTS", "deepcatalog.example.com")
+    clear_desktop_bootstrap()
+    nonce = mint_desktop_bootstrap()
+    client = TestClient(
+        app, client=("203.0.113.9", 50000), base_url="https://deepcatalog.example.com"
+    )
+    resp = client.get(
+        f"/api/auth/desktop-bootstrap/{nonce}",
+        headers={"Host": "deepcatalog.example.com"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 403
+    assert "loopback" in resp.json()["detail"]
+    # Nonce is still valid for a later loopback consume.
+    local = TestClient(app)
+    ok = local.get(f"/api/auth/desktop-bootstrap/{nonce}", follow_redirects=False)
+    assert ok.status_code == 303

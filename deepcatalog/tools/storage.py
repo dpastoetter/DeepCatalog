@@ -6,7 +6,10 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from chromadb.api.client import SharedSystemClient
+
 from deepcatalog import config
+from deepcatalog.chroma_local import embedded_chroma_client
 from deepcatalog.settings import get_source_dir, load_settings
 from deepcatalog.tools.filesystem import SUPPORTED_SUFFIXES, clear_inbox
 from deepcatalog.tools.metadata_db import init_db, list_recent
@@ -116,25 +119,17 @@ def clear_all_stored_data() -> dict[str, Any]:
     if not _is_within(chroma_dir, data_dir):
         raise RuntimeError(f"refusing to delete Chroma outside DATA_DIR: {chroma_dir}")
     try:
-        import chromadb
-        from chromadb.api.client import SharedSystemClient
-
-        try:
-            client = chromadb.PersistentClient(path=str(chroma_dir))
-            for name in ("deepcatalog_chunks", "paperless_chunks"):
-                try:
-                    client.delete_collection(name)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        client = embedded_chroma_client(chroma_dir)
+        for name in ("deepcatalog_chunks", "paperless_chunks"):
+            try:
+                client.delete_collection(name)
+            except Exception:
+                pass
         SharedSystemClient.clear_system_cache()
     except Exception:
         pass
     chroma_removed = _safe_rmtree(chroma_dir)
     try:
-        from chromadb.api.client import SharedSystemClient
-
         SharedSystemClient.clear_system_cache()
     except Exception:
         pass

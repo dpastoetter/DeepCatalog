@@ -19,7 +19,9 @@ from deepcatalog.ollama_url import (
     ALLOW_REMOTE_OLLAMA_ENV,
     DEFAULT_LOCAL_OLLAMA_URL,
     allow_remote_ollama_enabled,
+    apply_openai_compat_env_for_ollama,
     is_loopback_ollama_url,
+    ollama_client,
     trusted_ollama_origin,
 )
 
@@ -27,8 +29,8 @@ logger = logging.getLogger(__name__)
 
 
 def _ollama_client(*, origin: str, timeout: float) -> httpx.Client:
-    """HTTP client for Ollama — never follow redirects (SSRF)."""
-    return httpx.Client(base_url=origin, timeout=timeout, follow_redirects=False)
+    """HTTP client for Ollama — never follow redirects (SSRF); DNS pinned per connect."""
+    return ollama_client(origin=origin, timeout=timeout)
 
 
 def resolved_ollama_base_url(
@@ -547,10 +549,7 @@ def apply_llm_provider(
             os.environ[ALLOW_REMOTE_OLLAMA_ENV] = "1"
         else:
             os.environ.pop(ALLOW_REMOTE_OLLAMA_ENV, None)
-        # Point OpenAI-compatible clients at Ollama for ADK OpenAILlm usage.
-        os.environ["OPENAI_BASE_URL"] = f"{url}/v1"
-        if not os.environ.get("OPENAI_API_KEY"):
-            os.environ["OPENAI_API_KEY"] = "ollama"
+        apply_openai_compat_env_for_ollama(url, allow_remote=remote_enabled)
     else:
         # Clear leftovers from Ollama's OpenAI-compatible endpoint.
         base = os.environ.get("OPENAI_BASE_URL", "")

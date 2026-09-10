@@ -242,7 +242,7 @@
   <div id="session-unlock" class="session-unlock hidden" role="dialog" aria-modal="true" aria-labelledby="session-unlock-title" hidden>
     <form id="session-unlock-form" class="session-unlock-card">
       <h2 id="session-unlock-title">Unlock DeepCatalog Studio</h2>
-      <p class="fine">This host requires <code>DEEPCATALOG_API_TOKEN</code>. Enter it once — the server stores a short-lived session cookie; the secret is never kept in the page.</p>
+      <p class="fine">This host requires <code>DEEPCATALOG_API_TOKEN</code> (generated on first launch into your data-directory <code>.env</code>). Enter it once — the server stores a short-lived session cookie; the secret is never kept in the page. Loopback is not treated as logged-in on shared machines.</p>
       <label class="field">
         <span>API token</span>
         <input id="session-unlock-token" type="password" autocomplete="off" disabled required />

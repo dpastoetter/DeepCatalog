@@ -7,8 +7,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from deepcatalog.inbox_worker import is_processing
+from deepcatalog.release_trust import update_repo
 from deepcatalog.updater import (
-    UPDATE_REPO,
     apply_update,
     check_for_update,
     schedule_restart,
@@ -24,7 +24,7 @@ def api_update_status(check: bool = Query(default=False)) -> dict[str, Any]:
     if not check:
         return {
             "status": "success",
-            "repo": UPDATE_REPO,
+            "repo": update_repo(),
             "current_version": get_current_version(),
         }
     return check_for_update()
@@ -46,16 +46,22 @@ def api_update_apply() -> dict[str, Any]:
             )
         elif "up to date" in lowered:
             detail = "Already up to date."
-        elif "unverified" in lowered or "sha-256" in lowered:
-            detail = "Refusing to install an unverified release (missing SHA-256)."
+        elif (
+            "unsigned" in lowered
+            or "checksums are not authentic" in lowered
+            or "unverified" in lowered
+            or "missing a signed" in lowered
+        ):
+            detail = "Refusing to install an unsigned release (checksums are not authentic)."
         elif "download failed" in lowered:
             detail = "Download failed. Check your network and try again."
         elif "verification failed" in lowered or "sha-256 mismatch" in lowered:
             detail = "Release verification failed (SHA-256 mismatch)"
+        elif "release-commit" in lowered:
+            detail = "Archive does not match the signed manifest commit."
         else:
             detail = "update failed"
         raise HTTPException(status_code=409, detail=detail)
-    return result
     return result
 
 

@@ -9,10 +9,10 @@ import threading
 from pathlib import Path
 from typing import Any
 
-import chromadb
 import httpx
 
 from deepcatalog import config
+from deepcatalog.chroma_local import embedded_chroma_client
 from deepcatalog.config import (
     CHROMA_DIR,
     CHUNK_OVERLAP_CHARS,
@@ -25,7 +25,7 @@ from deepcatalog.ollama_setup import (
     format_http_error,
     resolve_runtime_model,
 )
-from deepcatalog.ollama_url import trusted_ollama_origin
+from deepcatalog.ollama_url import ollama_client, trusted_ollama_origin
 from deepcatalog.tools.metadata_db import (
     clear_all_indexed_at,
     get_document,
@@ -182,7 +182,7 @@ def _index_is_compatible(stored: dict[str, Any] | None, desired: dict[str, Any])
 
 def _chroma_client():
     ensure_data_dirs()
-    return chromadb.PersistentClient(path=str(CHROMA_DIR))
+    return embedded_chroma_client(CHROMA_DIR)
 
 
 def _chroma_collection():
@@ -397,7 +397,7 @@ def _embed_ollama(texts: list[str], *, model: str | None = None) -> list[list[fl
     resolved = resolve_runtime_model(model or config.EMBEDDING_MODEL)
     origin = trusted_ollama_origin(config.OLLAMA_BASE_URL)
     try:
-        with httpx.Client(base_url=origin, timeout=120, follow_redirects=False) as client:
+        with ollama_client(origin=origin, timeout=120) as client:
             resp = client.post(
                 "/api/embed",
                 json={"model": resolved, "input": texts},

@@ -29,6 +29,8 @@ def test_update_status_check_reports_newer(client, monkeypatch):
             "html_url": "https://github.com/x/y/releases/tag/v99.0.0",
             "tarball_url": "https://api.github.com/repos/x/y/tarball/v99.0.0",
             "verifiable": True,
+            "signed": True,
+            "manifest_commit": "a" * 40,
             "verification_error": None,
             "artifact": {
                 "filename": "deepcatalog-99.0.0.tar.gz",
@@ -42,6 +44,7 @@ def test_update_status_check_reports_newer(client, monkeypatch):
     assert body["latest_version"] == "99.0.0"
     assert body["notes"] == "big release"
     assert body["verifiable"] is True
+    assert body["signed"] is True
     assert body["expected_sha256"] == "a" * 64
     assert body["installable"] is True
     assert body["appimage"] is False
@@ -97,6 +100,8 @@ def test_update_status_check_appimage_not_installable(client, monkeypatch):
             "html_url": "https://github.com/x/y/releases/tag/v99.0.0",
             "tarball_url": "https://api.github.com/repos/x/y/tarball/v99.0.0",
             "verifiable": True,
+            "signed": True,
+            "manifest_commit": "a" * 40,
             "verification_error": None,
             "artifact": {
                 "filename": "deepcatalog-99.0.0.tar.gz",
@@ -116,6 +121,24 @@ def test_update_status_check_appimage_not_installable(client, monkeypatch):
     assert body["installable"] is False
     assert body["appimage"] is True
     assert body["appimage_url"].endswith(".AppImage")
+
+
+def test_update_apply_conflicts_on_unsigned(client, monkeypatch):
+    monkeypatch.setattr(
+        "deepcatalog.updater.check_for_update",
+        lambda: {
+            "status": "success",
+            "current_version": "0.1.0",
+            "latest_version": "9.9.9",
+            "update_available": True,
+            "verifiable": False,
+            "signed": False,
+            "verification_error": "Latest release is missing a signed release-manifest.json",
+        },
+    )
+    resp = client.post("/api/update/apply")
+    assert resp.status_code == 409
+    assert "unsigned" in resp.json()["detail"].lower()
 
 
 def test_update_apply_conflicts_on_appimage(client, monkeypatch):

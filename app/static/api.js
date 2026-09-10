@@ -60,7 +60,7 @@ export async function api(path, options = {}) {
   // from cross-site form posts (browsers cannot attach it without CORS).
   headers.set("X-Requested-With", "DeepCatalog");
   // Auth is the HttpOnly deepcatalog_session cookie (set via POST /api/auth/session or
-  // direct loopback bootstrap). Never put DEEPCATALOG_API_TOKEN in JS / sessionStorage.
+  // the desktop one-time bootstrap). Never put DEEPCATALOG_API_TOKEN in JS / sessionStorage.
   let body = options.body;
   if (
     body != null &&

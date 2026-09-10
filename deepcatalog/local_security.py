@@ -17,6 +17,7 @@ from uvicorn.lifespan.on import LifespanOn
 from uvicorn.server import Server as UvicornServer
 
 TOKEN_ENV = "DEEPCATALOG_API_TOKEN"
+SINGLE_USER_ENV = "DEEPCATALOG_SINGLE_USER"
 ALLOW_REMOTE_ENV = "DEEPCATALOG_ALLOW_REMOTE"
 ALLOWED_HOSTS_ENV = "DEEPCATALOG_ALLOWED_HOSTS"
 TRUSTED_PROXIES_ENV = "DEEPCATALOG_TRUSTED_PROXIES"
@@ -93,6 +94,11 @@ def get_api_token() -> str | None:
 def generate_api_token() -> str:
     """Cryptographically strong token for DEEPCATALOG_API_TOKEN."""
     return secrets.token_urlsafe(32)
+
+
+def single_user_desktop_enabled() -> bool:
+    """Explicit opt-in: treat direct loopback as trusted (dedicated single-user machine)."""
+    return env_flag(SINGLE_USER_ENV)
 
 
 def allow_remote_enabled() -> bool:
@@ -340,13 +346,17 @@ def is_direct_loopback_request(*, peer_host: str | None, host_header: str | None
 
 
 def auth_required_for_request(*, peer_host: str | None, host_header: str | None = None) -> bool:
-    """Bearer/cookie auth is required unless this is a genuine direct loopback client.
+    """Bearer/cookie auth is required unless single-user desktop mode is opted in.
 
-    A configured API token always requires auth. X-Forwarded-* is never used here.
+    Loopback is not an authentication boundary: any local process or OS account
+    can connect to 127.0.0.1. Set DEEPCATALOG_SINGLE_USER=1 only on a dedicated
+    machine that accepts that risk. X-Forwarded-* is never used here.
     """
-    if get_api_token():
-        return True
-    return not is_direct_loopback_request(peer_host=peer_host, host_header=host_header)
+    if single_user_desktop_enabled() and is_direct_loopback_request(
+        peer_host=peer_host, host_header=host_header
+    ):
+        return False
+    return True
 
 
 def extract_bearer_token(authorization: str | None) -> str | None:

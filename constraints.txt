@@ -57,6 +57,8 @@ charset-normalizer==3.5.0
     # via requests
 chromadb==1.5.9
     # via deepcatalog (pyproject.toml)
+    # CVE-2026-45829 / CVE-2026-45833: Chroma HTTP server (1.0.0–1.5.9); no patched
+    # release as of 2026-09-10. DeepCatalog uses embedded PersistentClient only.
 click==8.4.2
     # via
     #   google-adk

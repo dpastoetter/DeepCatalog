@@ -13,8 +13,8 @@ def test_list_running_models_parses_ps_response():
     mock_resp.json.return_value = {"models": [{"name": "gemma3:4b"}]}
     mock_resp.raise_for_status = MagicMock()
 
-    with patch("deepcatalog.ollama_setup.httpx.Client") as client_cls:
-        client = client_cls.return_value.__enter__.return_value
+    with patch("deepcatalog.ollama_setup._ollama_client") as client_fn:
+        client = client_fn.return_value.__enter__.return_value
         client.get.return_value = mock_resp
         result = ollama_setup.list_running_models()
 
@@ -28,8 +28,8 @@ def test_unload_model_posts_keep_alive_zero():
     embed_resp = MagicMock()
     embed_resp.raise_for_status = MagicMock()
 
-    with patch("deepcatalog.ollama_setup.httpx.Client") as client_cls:
-        client = client_cls.return_value.__enter__.return_value
+    with patch("deepcatalog.ollama_setup._ollama_client") as client_fn:
+        client = client_fn.return_value.__enter__.return_value
         client.post.side_effect = [chat_resp, embed_resp]
         with (
             patch(

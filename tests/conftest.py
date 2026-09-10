@@ -19,12 +19,22 @@ from deepcatalog.config import ensure_data_dirs
 from deepcatalog.privacy import clear_privacy_cache
 from deepcatalog.settings import clear_settings_cache, load_settings
 
+# Stable secret for the unit suite — not a production value.
+TEST_API_TOKEN = "pytest-local-api-token-not-for-production"
+
 
 @pytest.fixture(autouse=True)
 def _reset_auth_rate_limiter():
     reset_auth_rate_limiter()
     yield
     reset_auth_rate_limiter()
+
+
+@pytest.fixture(autouse=True)
+def _default_api_token(monkeypatch):
+    """Require auth by default; tests that need a missing token must delenv it."""
+    monkeypatch.setenv("DEEPCATALOG_API_TOKEN", TEST_API_TOKEN)
+    monkeypatch.delenv("DEEPCATALOG_SINGLE_USER", raising=False)
 
 
 @pytest.fixture()
@@ -36,6 +46,7 @@ def isolated_data(tmp_path, monkeypatch):
     monkeypatch.setattr("deepcatalog.config.ARCHIVE_DIR", data / "archive")
     monkeypatch.setattr("deepcatalog.config.DB_PATH", data / "deepcatalog.db")
     monkeypatch.setattr("deepcatalog.config.CHROMA_DIR", data / "chroma")
+    monkeypatch.setattr("deepcatalog.tools.rag_index.CHROMA_DIR", data / "chroma")
     # metadata_db froze DB_PATH at import time; patch its module copy too.
     monkeypatch.setattr("deepcatalog.tools.metadata_db.DB_PATH", data / "deepcatalog.db")
     clear_settings_cache()
@@ -56,9 +67,20 @@ def stub_rag_index(monkeypatch):
     )
 
 
+def apply_test_client_auth(client: TestClient, *, token: str | None = None) -> None:
+    """Attach CSRF + Bearer headers expected by the default auth policy."""
+    secret = token or os.environ.get("DEEPCATALOG_API_TOKEN") or TEST_API_TOKEN
+    client.headers.update(
+        {
+            CSRF_HEADER_NAME: CSRF_HEADER_VALUE,
+            "Authorization": f"Bearer {secret}",
+        }
+    )
+
+
 @pytest.fixture()
 def client(isolated_data):
-    """TestClient that always sends the CSRF header required by mutating routes."""
+    """TestClient that sends CSRF + Bearer required by mutating and API routes."""
     with TestClient(app) as tc:
-        tc.headers.update({CSRF_HEADER_NAME: CSRF_HEADER_VALUE})
+        apply_test_client_auth(tc)
         yield tc

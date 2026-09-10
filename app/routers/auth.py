@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi.responses import RedirectResponse
 
 from app.deps import peer_host, rate_limit_ip, request_is_https, require_cloud_disclaimer_or_403
 from app.schemas import (
@@ -34,6 +35,7 @@ from deepcatalog.codex_oauth import (
     save_api_key,
     start_oauth_login,
 )
+from deepcatalog.desktop_bootstrap import consume_desktop_bootstrap
 from deepcatalog.inbox_worker import cancel_active_file, is_processing
 from deepcatalog.job_control import get_active_file_id
 from deepcatalog.llm import resolve_model_name
@@ -41,6 +43,7 @@ from deepcatalog.local_security import (
     COOKIE_NAME,
     auth_required_for_request,
     get_api_token,
+    is_direct_loopback_request,
 )
 from deepcatalog.ollama_setup import (
     apply_llm_provider,
@@ -84,14 +87,49 @@ def api_session_status(request: Request) -> dict[str, Any]:
     required = auth_required_for_request(
         peer_host=peer_host(request),
         host_header=request.headers.get("host"),
-    ) and bool(get_api_token())
+    )
     cookie = request.cookies.get(COOKIE_NAME)
+    if not required:
+        authenticated = True
+    elif not get_api_token():
+        authenticated = False
+    else:
+        authenticated = session_is_valid(cookie)
     return {
         "status": "success",
         "auth_required": required,
-        "authenticated": session_is_valid(cookie) if required else True,
+        "authenticated": authenticated,
         "session_ttl_seconds": session_ttl_seconds(),
     }
+
+
+@router.get("/api/auth/desktop-bootstrap/{nonce}")
+def api_desktop_bootstrap(nonce: str, request: Request) -> RedirectResponse:
+    """Consume a one-time desktop nonce and set the HttpOnly session cookie."""
+    if not is_direct_loopback_request(
+        peer_host=peer_host(request),
+        host_header=request.headers.get("host"),
+    ):
+        raise HTTPException(status_code=403, detail="desktop bootstrap is loopback-only")
+    limiter = get_auth_rate_limiter()
+    client_ip = rate_limit_ip(request)
+    allowed, retry_after = limiter.check_session(client_ip)
+    if not allowed:
+        log_rate_limited(client_ip, request.url.path, retry_after)
+        raise HTTPException(
+            status_code=429,
+            detail=RATE_LIMIT_DETAIL,
+            headers=rate_limit_response_headers(retry_after),
+        )
+    if not consume_desktop_bootstrap(nonce):
+        limiter.record_session_failure(client_ip)
+        raise HTTPException(status_code=401, detail="invalid or expired desktop bootstrap")
+    limiter.record_session_success(client_ip)
+    raw = create_session()
+    target = "/?desktop=1" if request.query_params.get("desktop") == "1" else "/"
+    redirect = RedirectResponse(url=target, status_code=303)
+    attach_session_cookie(redirect, raw, secure=request_is_https(request))
+    return redirect
 
 
 @router.post("/api/auth/session")

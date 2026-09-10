@@ -359,6 +359,10 @@ def test_launch_falls_back_to_chromium_when_webview_fails(tmp_path, monkeypatch)
 
 def test_desktop_ui_url_marks_app_shell():
     assert desktop_ui_url("127.0.0.1", 8080) == "http://127.0.0.1:8080/?desktop=1"
+    assert (
+        desktop_ui_url("127.0.0.1", 8080, bootstrap_nonce="abc")
+        == "http://127.0.0.1:8080/api/auth/desktop-bootstrap/abc?desktop=1"
+    )
 
 
 def test_is_external_http_url():

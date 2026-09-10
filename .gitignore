@@ -18,3 +18,4 @@ build/
 htmlcov/
 node_modules/
 .cursor/
+.release-signing-key

@@ -21,30 +21,20 @@ import httpx
 
 from deepcatalog import config
 from deepcatalog.config import running_as_appimage
+from deepcatalog.release_trust import (
+    MANIFEST_NAME,
+    MANIFEST_SIG_NAME,
+    artifact_sha256,
+    update_repo,
+    verify_manifest_signature,
+)
 from deepcatalog.version import get_current_version
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_UPDATE_REPO = "dpastoetter/DeepCatalog"
-_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _SHA256_LINE_RE = re.compile(r"^\s*([A-Fa-f0-9]{64})\s+\*?(.+?)\s*$")
-_DIGEST_RE = re.compile(r"^sha256:([A-Fa-f0-9]{64})$", re.IGNORECASE)
 _SUMS_NAMES = frozenset({"SHA256SUMS", "SHA256SUMS.txt", "checksums.txt"})
-
-
-def _resolve_update_repo() -> str:
-    raw = os.getenv("DEEPCATALOG_UPDATE_REPO", _DEFAULT_UPDATE_REPO).strip()
-    if not _REPO_RE.fullmatch(raw):
-        logger.warning(
-            "Ignoring invalid DEEPCATALOG_UPDATE_REPO=%r; using %s",
-            raw,
-            _DEFAULT_UPDATE_REPO,
-        )
-        return _DEFAULT_UPDATE_REPO
-    return raw
-
-
-UPDATE_REPO = _resolve_update_repo()
+_NON_ARCHIVE_NAMES = _SUMS_NAMES | {MANIFEST_NAME, MANIFEST_SIG_NAME}
 GITHUB_API = "https://api.github.com"
 GITHUB_CONNECT_TIMEOUT = 12.0
 GITHUB_READ_TIMEOUT = 45.0
@@ -157,20 +147,12 @@ def parse_sha256sums(text: str) -> dict[str, str]:
     return mapping
 
 
-def _asset_digest(asset: dict[str, Any]) -> str | None:
-    raw = (asset.get("digest") or "").strip()
-    if not raw:
-        return None
-    match = _DIGEST_RE.match(raw)
-    return match.group(1).lower() if match else None
-
-
 def _pick_archive_asset(assets: list[dict[str, Any]]) -> dict[str, Any] | None:
     archives = [
         asset
         for asset in assets
         if isinstance(asset.get("name"), str)
-        and asset["name"] not in _SUMS_NAMES
+        and asset["name"] not in _NON_ARCHIVE_NAMES
         and asset["name"].lower().endswith((".tar.gz", ".tgz"))
     ]
     if not archives:
@@ -198,60 +180,107 @@ def _pick_appimage_asset(assets: list[dict[str, Any]]) -> dict[str, Any] | None:
 def _resolve_commit_sha(client: httpx.Client, tag: str) -> str | None:
     if not tag:
         return None
-    resp = _github_get(client, f"{GITHUB_API}/repos/{UPDATE_REPO}/commits/{tag}")
+    resp = _github_get(client, f"{GITHUB_API}/repos/{update_repo()}/commits/{tag}")
     if resp.status_code != 200:
         return None
     sha = (resp.json() or {}).get("sha")
     return sha if isinstance(sha, str) and sha else None
 
 
-def _select_verified_artifact(
+def _asset_url(asset: dict[str, Any]) -> str | None:
+    url = asset.get("browser_download_url") or asset.get("url")
+    return url if isinstance(url, str) and url else None
+
+
+def _pick_named_asset(assets: list[dict[str, Any]], filename: str) -> dict[str, Any] | None:
+    for asset in assets:
+        if isinstance(asset, dict) and asset.get("name") == filename:
+            return asset
+    return None
+
+
+def _download_asset_bytes(client: httpx.Client, asset: dict[str, Any]) -> bytes | None:
+    url = _asset_url(asset)
+    if not url:
+        return None
+    resp = _github_get(client, url, headers=_github_headers(accept="application/octet-stream"))
+    if not resp.is_success:
+        return None
+    return resp.content
+
+
+def _unsigned_release_error() -> str:
+    return (
+        "Latest release is missing a signed release-manifest.json "
+        f"(and {MANIFEST_SIG_NAME}) bound to the tag and commit. "
+        "Checksum files alone are not authentic."
+    )
+
+
+def _select_signed_artifact(
     release: dict[str, Any],
     *,
-    sums_text: str | None,
+    manifest: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """
-    Choose a downloadable archive that has an expected SHA-256.
-
-    Prefers an uploaded `.tar.gz` release asset. Uses the asset's GitHub
-    `digest` when present, otherwise a `SHA256SUMS` asset entry.
-    """
+    """Choose the source archive whose SHA-256 is listed in the signed manifest."""
     assets = [
         asset
         for asset in (release.get("assets") or [])
         if isinstance(asset, dict) and isinstance(asset.get("name"), str)
     ]
-    sums = parse_sha256sums(sums_text or "")
     archive = _pick_archive_asset(assets)
     if archive is None:
         return None
-
-    expected = _asset_digest(archive) or sums.get(archive["name"])
+    expected = artifact_sha256(manifest, archive["name"])
     if not expected:
         return None
-    url = archive.get("browser_download_url") or archive.get("url")
-    if not isinstance(url, str) or not url:
+    url = _asset_url(archive)
+    if not url:
         return None
     return {
         "filename": archive["name"],
         "download_url": url,
         "expected_sha256": expected,
-        "source": "release-asset",
+        "source": "signed-manifest",
     }
 
 
+def _load_signed_manifest(
+    client: httpx.Client, assets: list[dict[str, Any]]
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Return (manifest, error). Manifest is None when signature/schema fails."""
+    manifest_asset = _pick_named_asset(assets, MANIFEST_NAME)
+    sig_asset = _pick_named_asset(assets, MANIFEST_SIG_NAME)
+    if manifest_asset is None or sig_asset is None:
+        return None, _unsigned_release_error()
+    manifest_bytes = _download_asset_bytes(client, manifest_asset)
+    sig_bytes = _download_asset_bytes(client, sig_asset)
+    if manifest_bytes is None or sig_bytes is None:
+        return None, "Could not download the signed release manifest."
+    try:
+        signature_text = sig_bytes.decode("ascii")
+    except UnicodeDecodeError:
+        return None, "Release manifest signature is not valid hex."
+    try:
+        manifest = verify_manifest_signature(manifest_bytes, signature_text)
+    except ValueError as exc:
+        return None, str(exc)
+    return manifest, None
+
+
 def _fetch_latest_release() -> dict[str, Any] | None:
-    """Latest GitHub release with verification metadata (no unverified tag fallback for install)."""
+    """Latest GitHub release with a signed manifest (checksum-only releases are not installable)."""
+    repo = update_repo()
     with httpx.Client(
         timeout=_github_timeout(),
         follow_redirects=True,
     ) as client:
-        resp = _github_get(client, f"{GITHUB_API}/repos/{UPDATE_REPO}/releases/latest")
+        resp = _github_get(client, f"{GITHUB_API}/repos/{repo}/releases/latest")
         if resp.status_code == 404:
             # No releases published — surface tags for "what's newest" only.
             resp = _github_get(
                 client,
-                f"{GITHUB_API}/repos/{UPDATE_REPO}/tags",
+                f"{GITHUB_API}/repos/{repo}/tags",
                 params={"per_page": 1},
             )
             resp.raise_for_status()
@@ -265,14 +294,15 @@ def _fetch_latest_release() -> dict[str, Any] | None:
                 "name": tag,
                 "notes": "",
                 "published_at": None,
-                "html_url": f"https://github.com/{UPDATE_REPO}/releases",
-                "tarball_url": f"{GITHUB_API}/repos/{UPDATE_REPO}/tarball/{tag}",
+                "html_url": f"https://github.com/{repo}/releases",
+                "tarball_url": f"{GITHUB_API}/repos/{repo}/tarball/{tag}",
                 "commit_sha": commit_sha,
                 "assets": [],
                 "verifiable": False,
+                "signed": False,
                 "artifact": None,
                 "verification_error": (
-                    "No GitHub release with a SHA-256-verified archive asset. "
+                    "No GitHub release with a signed release manifest. "
                     "Tag-only installs are disabled."
                 ),
             }
@@ -282,22 +312,9 @@ def _fetch_latest_release() -> dict[str, Any] | None:
         assets = data.get("assets") or []
         if not isinstance(assets, list):
             assets = []
+        typed_assets = [asset for asset in assets if isinstance(asset, dict)]
 
-        sums_text: str | None = None
-        for asset in assets:
-            if not isinstance(asset, dict):
-                continue
-            if asset.get("name") not in _SUMS_NAMES:
-                continue
-            sums_url = asset.get("browser_download_url") or asset.get("url")
-            if not isinstance(sums_url, str):
-                continue
-            sums_headers = _github_headers(accept="application/octet-stream")
-            sums_resp = _github_get(client, sums_url, headers=sums_headers)
-            if sums_resp.is_success:
-                sums_text = sums_resp.text
-                break
-
+        commit_sha = _resolve_commit_sha(client, tag)
         release = {
             "tag": tag,
             "name": data.get("name") or tag,
@@ -305,19 +322,40 @@ def _fetch_latest_release() -> dict[str, Any] | None:
             "published_at": data.get("published_at"),
             "html_url": data.get("html_url"),
             "tarball_url": data.get("tarball_url"),
-            "commit_sha": _resolve_commit_sha(client, tag),
+            "commit_sha": commit_sha,
             "assets": assets,
+            "signed": False,
+            "manifest_commit": None,
         }
-        artifact = _select_verified_artifact(release, sums_text=sums_text)
+        manifest, manifest_error = _load_signed_manifest(client, typed_assets)
+        if manifest is None:
+            release["artifact"] = None
+            release["verifiable"] = False
+            release["verification_error"] = manifest_error or _unsigned_release_error()
+            return release
+
+        bind_error: str | None = None
+        if manifest["repo"] != repo:
+            bind_error = "Signed manifest repo does not match this build's update trust root."
+        elif manifest["tag"] != tag:
+            bind_error = "Signed manifest tag does not match the GitHub release tag."
+        elif not commit_sha or manifest["commit"] != commit_sha.lower():
+            bind_error = "Signed manifest commit does not match the release tag commit."
+        if bind_error:
+            release["artifact"] = None
+            release["verifiable"] = False
+            release["verification_error"] = bind_error
+            return release
+
+        artifact = _select_signed_artifact(release, manifest=manifest)
         release["artifact"] = artifact
+        release["signed"] = True
+        release["manifest_commit"] = manifest["commit"]
         release["verifiable"] = artifact is not None
         release["verification_error"] = (
             None
             if artifact is not None
-            else (
-                "Latest release is missing a .tar.gz asset with a SHA-256 digest "
-                "(GitHub asset digest or SHA256SUMS). Refusing unverified installs."
-            )
+            else ("Signed manifest does not list a SHA-256 for the release .tar.gz asset.")
         )
         return release
 
@@ -328,10 +366,11 @@ def check_for_update() -> dict[str, Any]:
     installable = not running_as_appimage()
     base = {
         "status": "success",
-        "repo": UPDATE_REPO,
+        "repo": update_repo(),
         "current_version": current,
         "update_available": False,
         "verifiable": False,
+        "signed": False,
         "installable": installable,
         "appimage": running_as_appimage(),
     }
@@ -341,7 +380,7 @@ def check_for_update() -> dict[str, Any]:
         logger.warning("could not reach GitHub for update check")
         return {
             "status": "error",
-            "repo": UPDATE_REPO,
+            "repo": update_repo(),
             "current_version": current,
             "error": "Could not reach GitHub. Check your network and try again.",
         }
@@ -368,8 +407,10 @@ def check_for_update() -> dict[str, Any]:
         "html_url": latest["html_url"],
         "tarball_url": latest.get("tarball_url"),
         "commit_sha": latest.get("commit_sha"),
+        "manifest_commit": latest.get("manifest_commit"),
         "update_available": is_newer(latest["tag"], current),
         "verifiable": bool(latest.get("verifiable")),
+        "signed": bool(latest.get("signed")),
         "verification_error": latest.get("verification_error"),
         "artifact_name": artifact.get("filename"),
         "expected_sha256": artifact.get("expected_sha256"),
@@ -434,11 +475,27 @@ def _read_release_file_list(path: Path) -> set[str]:
     return {line.strip() for line in lines if line.strip() and not line.strip().startswith("#")}
 
 
+def _parse_release_commit_file(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        if line.startswith("commit="):
+            sha = line.split("=", 1)[1].strip().lower()
+            if re.fullmatch(r"[a-f0-9]{40}", sha):
+                return sha
+    return None
+
+
 def apply_tarball(
     tar_bytes: bytes,
     *,
     commit_sha: str | None = None,
     expect_commit_match: bool = False,
+    expected_release_commit: str | None = None,
 ) -> dict[str, Any]:
     """
     Extract a release/source tarball and sync it over the install directory.
@@ -473,6 +530,18 @@ def apply_tarball(
                     f"commit {commit_sha} — update aborted"
                 ),
             }
+
+        if expected_release_commit:
+            packed = _parse_release_commit_file(source_root / ".release-commit")
+            want = expected_release_commit.strip().lower()
+            if not packed or packed != want:
+                return {
+                    "status": "error",
+                    "error": (
+                        "Archive .release-commit does not match the signed manifest "
+                        "commit — update aborted"
+                    ),
+                }
 
         previous_files = _read_release_file_list(root / ".release-files")
         new_files: set[str] = set()
@@ -561,13 +630,15 @@ def apply_update() -> dict[str, Any]:
         }
     if (
         not info.get("verifiable")
+        or not info.get("signed")
         or not info.get("expected_sha256")
         or not info.get("download_url")
+        or not info.get("manifest_commit")
     ):
         return {
             "status": "error",
             "error": info.get("verification_error")
-            or "Refusing to install an unverified release (missing SHA-256).",
+            or "Refusing to install an unsigned release (checksums are not authentic).",
         }
 
     try:
@@ -582,9 +653,8 @@ def apply_update() -> dict[str, Any]:
         logger.exception("update SHA-256 verification failed")
         return {"status": "error", "error": "Release verification failed (SHA-256 mismatch)"}
 
-    # Release assets use versioned roots (deepcatalog-0.1.2/), not GitHub's
-    # {owner}-{repo}-{sha}/ layout. Integrity comes from the SHA-256 check above.
-    result = apply_tarball(tar_bytes)
+    # Integrity: Ed25519 manifest + SHA-256 of these bytes + packed .release-commit.
+    result = apply_tarball(tar_bytes, expected_release_commit=str(info["manifest_commit"]))
     if result.get("status") != "success":
         return result
 
@@ -593,6 +663,7 @@ def apply_update() -> dict[str, Any]:
         "installed_version": info.get("latest_version"),
         "previous_version": info["current_version"],
         "verified_sha256": info["expected_sha256"],
+        "verified_commit": info.get("manifest_commit"),
         "artifact_name": info.get("artifact_name"),
         "restart_required": True,
     }

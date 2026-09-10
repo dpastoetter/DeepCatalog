@@ -1,8 +1,9 @@
 """Smoke tests for ADK agent wiring and ingest helpers (no live API calls)."""
 
+from deepcatalog.adk_debug import build_pipeline_agent
 from deepcatalog.agent import root_agent as pipeline_agent
 from deepcatalog.llm import resolve_model_name
-from deepcatalog.pipeline.agents import build_pipeline_agent, parse_json_blob
+from deepcatalog.pipeline.agents import parse_json_blob
 from query_agent.agent import root_agent as query_agent
 
 

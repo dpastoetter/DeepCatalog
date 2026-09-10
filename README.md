@@ -282,6 +282,9 @@ DEEPCATALOG_EMBEDDING_MODEL=nomic-embed-text
 # OLLAMA_BASE_URL=http://localhost:11434   (default; loopback only)
 # Remote Ollama (another host) needs Settings → Remote Ollama (privacy disclaimer)
 # or DEEPCATALOG_ALLOW_REMOTE_OLLAMA=1 with a non-loopback OLLAMA_BASE_URL.
+# Remote hostnames also need DEEPCATALOG_OLLAMA_ALLOWED_HOSTS=gpu.lan
+# (literal IPs such as http://192.168.1.10:11434 do not rebind and skip the list
+# unless the allowlist is set, in which case the IP must be listed too).
 ```
 
 **User-local install (no sudo):** on Linux you can install the Ollama binary under `~/.local/bin` and libraries under `~/.local/lib/ollama`. If you use a user-local build, ensure `LD_LIBRARY_PATH` includes `~/.local/lib/ollama` when starting `ollama serve` (DeepCatalog’s systemd autostart unit sets this automatically when that directory exists).
@@ -315,9 +318,9 @@ That owned entry records `DEEPCATALOG_HOST` / `DEEPCATALOG_PORT` and starts uvic
 | Ollama OCR times out on CPU | Raise `DEEPCATALOG_OLLAMA_OCR_PAGE_TIMEOUT` (default 900s) or lower `DEEPCATALOG_OLLAMA_OCR_MAX_IMAGE_PX` (default 1024); see [OCR tuning](#ocr-and-long-documents) |
 | Find details fails with “invalid JSON” | Usually empty/malformed model output — retry the file; with ChatGPT OAuth confirm a Codex model is selected and you are signed in |
 
-Uvicorn should bind to `127.0.0.1` (the default). The API has no user login; mutating routes also require a custom header the UI sends (CSRF hardening).
+Uvicorn should bind to `127.0.0.1` (the default). **Loopback is not an authentication boundary** — any local process or OS account can connect to `127.0.0.1:8080`. On first launch the app generates `DEEPCATALOG_API_TOKEN` and stores it in `DATA_DIR/.env` (mode `0600`). Every `/api/*` route except health and session/desktop bootstrap requires `Authorization: Bearer …` or an HttpOnly `deepcatalog_session` cookie. The desktop window bootstraps through a one-time nonce (not by treating localhost as logged-in). A browser on a shared machine uses the unlock panel with that token. Mutating routes also require a custom header the UI sends (CSRF hardening).
 
-**Local mode** (default): `DEEPCATALOG_HOST=127.0.0.1` / `::1` — plain HTTP is fine on loopback.
+**Local mode** (default): `DEEPCATALOG_HOST=127.0.0.1` / `::1` — plain HTTP is fine on loopback, but **API auth is still required**. Set `DEEPCATALOG_SINGLE_USER=1` only on a dedicated machine if you explicitly want the old “anyone on loopback is trusted” behavior.
 
 **Network mode** (bind `0.0.0.0`, a LAN IP, etc.): refused unless you set **all** of:
 
@@ -327,12 +330,15 @@ Uvicorn should bind to `127.0.0.1` (the default). The API has no user login; mut
 
 A token over plain HTTP on a LAN can be intercepted; network mode therefore requires TLS on the app itself. Prefer keeping the app on loopback and terminating TLS on a reverse proxy instead (see [Network access (TLS reverse proxy)](#network-access-tls-reverse-proxy)). Credentials from non-loopback clients are refused unless the request is HTTPS (`X-Forwarded-Proto` is honored only for `DEEPCATALOG_TRUSTED_PROXIES`).
 
-With a token configured, every `/api/*` route except health/session bootstrap requires either `Authorization: Bearer <DEEPCATALOG_API_TOKEN>` (machine clients) or an HttpOnly `deepcatalog_session` cookie. Browser sessions are **random ids** created by `POST /api/auth/session` (or automatically for a **direct** loopback browser — loopback TCP peer and loopback Host, never via a reverse proxy). The long-lived API secret is never injected into JavaScript, reused as the cookie value, or accepted in a URL query string (`?token=` is ignored). Session creation and failed token checks are rate-limited per client IP (stricter on `POST /api/auth/session`); repeated failures are logged without the secret. Uvicorn access logs omit query strings so a pasted secret cannot land in log files. Host headers are allowlisted (`DEEPCATALOG_ALLOWED_HOSTS`, defaulting to localhost / loopback) to harden against DNS rebinding. `X-Forwarded-*` is used only to recover the client IP / HTTPS scheme from a listed `DEEPCATALOG_TRUSTED_PROXIES` hop; it is never an authentication signal.
+With a token configured (always, after first launch), every `/api/*` route except health/session/desktop bootstrap requires either `Authorization: Bearer <DEEPCATALOG_API_TOKEN>` (machine clients) or an HttpOnly `deepcatalog_session` cookie. Browser sessions are **random ids** created by `POST /api/auth/session` or by the desktop window’s one-time bootstrap URL. Loopback browsers do **not** auto-login unless `DEEPCATALOG_SINGLE_USER=1`. The long-lived API secret is never injected into JavaScript, reused as the cookie value, or accepted in a URL query string (`?token=` is ignored). Session creation and failed token checks are rate-limited per client IP (stricter on `POST /api/auth/session`); repeated failures are logged without the secret. Uvicorn access logs omit query strings and desktop-bootstrap path secrets so they cannot land in log files. Host headers are allowlisted (`DEEPCATALOG_ALLOWED_HOSTS`, defaulting to localhost / loopback) to harden against DNS rebinding. `X-Forwarded-*` is used only to recover the client IP / HTTPS scheme from a listed `DEEPCATALOG_TRUSTED_PROXIES` hop; it is never an authentication signal.
 
 ```bash
+# First launch writes a random token into DATA_DIR/.env (0600). To set your own:
 python -c "from deepcatalog.local_security import generate_api_token; print(generate_api_token())"
 # → put the value in .env as DEEPCATALOG_API_TOKEN=…
 # Optional: DEEPCATALOG_SESSION_TTL_SECONDS=86400  (default 24h)
+# Dedicated single-user machine only (restores loopback auto-login — not for shared hosts):
+# DEEPCATALOG_SINGLE_USER=1
 ```
 
 Open [http://localhost:8080](http://localhost:8080).
@@ -378,7 +384,7 @@ server {
 
 4. Example **Traefik** (label-style): route HTTPS entrypoint → `http://127.0.0.1:8080`, and only then set `DEEPCATALOG_TRUSTED_PROXIES` to the Traefik container/host IP.
 
-Do **not** set `DEEPCATALOG_TRUSTED_PROXIES=0.0.0.0/0` (or `::/0`); those catch-alls are ignored. Only list the proxy addresses that terminate TLS. Public/proxied browsers always use the session unlock panel (or Bearer token); localhost auto-login does not apply behind the proxy.
+Do **not** set `DEEPCATALOG_TRUSTED_PROXIES=0.0.0.0/0` (or `::/0`); those catch-alls are ignored. Only list the proxy addresses that terminate TLS. Public/proxied browsers always use the session unlock panel (or Bearer token); loopback auto-login is off unless `DEEPCATALOG_SINGLE_USER=1`, and it never applies behind a proxy.
 
 If you truly need uvicorn itself on a non-loopback address, use network mode with app-level TLS:
 
@@ -495,34 +501,55 @@ If you switch embedding providers or models (Gemini / OpenAI / Ollama / local ON
 
 ## Updates
 
-**Settings → Software update** checks the GitHub releases of this repository and can download and install the latest version in place. Your documents, database, settings, and credentials (`data/`, `.env`) are never touched by an update.
+**Settings → Software update** checks GitHub Releases for `dpastoetter/DeepCatalog` and can download and install the latest version in place. Your documents, database, settings, and credentials (`data/`, `.env`) are never touched by an update.
 
-Installs are **fail-closed on integrity checks**: the updater only applies a release that includes a `.tar.gz` asset with a SHA-256 digest (GitHub asset `digest` and/or a `SHA256SUMS` file). Tag-only or checksum-less releases are shown but refused at install time. Update checks retry on transient network failures. **AppImage installs cannot be updated in place** (the squashfs is read-only) — Settings still reports a newer tag and links the GitHub AppImage asset; replace the file yourself.
+Installs are **fail-closed on provenance**: checksum files on the same GitHub Release are not authentic (whoever can upload `evil.tar.gz` can upload a matching `SHA256SUMS`). The updater requires an **Ed25519-signed** `release-manifest.json` whose public key is embedded in the app (`deepcatalog/release_trust.py`). The manifest binds the GitHub tag, the 40-character commit SHA, and each artifact’s SHA-256. After download, the archive hash must match the manifest and the packed `.release-commit` must match that commit. Tag-only or checksum-only releases are shown but refused at install time. `DEEPCATALOG_UPDATE_REPO` is ignored by the in-app updater so an environment change cannot redirect the trust root; forks must change `DEFAULT_UPDATE_REPO` and the verify key in source. Update checks retry on transient network failures. **AppImage installs cannot be updated in place** (the squashfs is read-only) — Settings still reports a newer tag and links the GitHub AppImage asset; replace the file yourself.
 
-Override the release source with `DEEPCATALOG_UPDATE_REPO=owner/repo` if you fork the project.
+CI also publishes **SLSA / Sigstore** artifact attestations for every official file (tarball, AppImage, installers, signed manifest, checksums). Independently:
 
-GitHub Actions **packages the Linux AppImage as part of the release SDLC**: quality gate → dependency audit → AppImage (Ubuntu 22.04 / glibc 2.35+) → tarball + checksums → attach everything to the GitHub Release. That runs when you:
+```bash
+gh attestation verify deepcatalog-0.6.0.tar.gz \
+  --repo dpastoetter/DeepCatalog \
+  --cert-identity https://github.com/dpastoetter/DeepCatalog/.github/workflows/release.yml \
+  --cert-oidc-issuer https://token.actions.githubusercontent.com
+gh attestation verify install.sh \
+  --repo dpastoetter/DeepCatalog \
+  --cert-identity https://github.com/dpastoetter/DeepCatalog/.github/workflows/release.yml \
+  --cert-oidc-issuer https://token.actions.githubusercontent.com
+```
 
-- push a version tag (`git tag v0.5.0 && git push origin v0.5.0`)
-- publish a GitHub Release in the UI (or `gh release create`) for a `v*` tag
-- run **Actions → Release → Run workflow** with the tag (rebuild / replace assets)
+Official GitHub Release assets are published **only** by `.github/workflows/release.yml` after quality + security + AppImage. A pre-populated release (for example an AppImage uploaded in the UI) does **not** skip those gates; the workflow rebuilds from the tag and deletes every existing asset before uploading its own. `curl … | bash` / `irm … | iex` installers are those CI assets.
+
+That pipeline runs when you:
+
+- push a version tag (`git tag v0.6.0 && git push origin v0.6.0`) — intended path
+- publish a GitHub Release in the UI (or `gh release create`) for a `v*` tag — treated as a rebuild that replaces UI files
+- run **Actions → Release → Run workflow** *from that tag ref* (not a branch)
+
+Do not attach files in the GitHub Release UI. The standalone **AppImage** workflow uploads an Actions artifact only; it never publishes a Release.
+
+**Repo protection (configure once in GitHub):**
+
+1. Environment **`official-release`** (the publish job waits here): required reviewers; limit deployments to tags matching `v[0-9]*`; store `DEEPCATALOG_RELEASE_SIGNING_KEY` as an environment secret rather than a repo secret.
+2. Tag ruleset on `refs/tags/v*`: block updates and deletions (no force-push / retarget); restrict who can create version tags.
 
 The packager archives the **exact tagged commit** (not a dirty working tree), verifies the file list against `git ls-tree`, and embeds `.release-commit` plus `.release-files` so installs/updates can confirm the SHA and prune stale paths.
 
-**Release checklist:** land every change on `main` first, bump `version` in `pyproject.toml` (the single source for package metadata, OpenAPI/`FastAPI.version`, and the in-app updater), regenerate pins if dependencies changed (`./scripts/lock-deps.sh`), commit, then create the matching tag on that commit (`git tag v0.5.0 && git push origin v0.5.0`) — or **GitHub → Releases → Draft a new release** using that tag. Tagging an older commit is how earlier releases missed later work.
+**Release checklist:** land every change on `main` first, bump `version` in `pyproject.toml` (the single source for package metadata, OpenAPI/`FastAPI.version`, and the in-app updater), regenerate pins if dependencies changed (`./scripts/lock-deps.sh`), commit, then create the matching tag on that commit (`git tag v0.6.0 && git push origin v0.6.0`). Tagging an older commit is how earlier releases missed later work. Publishing requires the Actions secret `DEEPCATALOG_RELEASE_SIGNING_KEY` (64-char hex Ed25519 seed, stored separately from `GITHUB_TOKEN`, preferably on the `official-release` environment) and an approval of that environment. Do not draft a GitHub Release with uploaded binaries.
 
 Local dry-run:
 
 ```bash
-git checkout v0.5.0
-./scripts/make-release-assets.sh v0.5.0
+git checkout v0.6.0
+./scripts/make-release-assets.sh v0.6.0
 # or before the tag exists:
-./scripts/make-release-assets.sh v0.5.0 HEAD
-# dist/ contains deepcatalog-0.5.0.tar.gz, install.sh, install.ps1, SHA256SUMS
+./scripts/make-release-assets.sh v0.6.0 HEAD
+# dist/ contains deepcatalog-0.6.0.tar.gz, install.sh, install.ps1, SHA256SUMS
+# CI then signs SHA256SUMS → release-manifest.json + .sig (needs DEEPCATALOG_RELEASE_SIGNING_KEY)
 
 # Linux x86_64 AppImage (needs poppler-utils + patchelf):
-./scripts/build-appimage.sh v0.5.0
-# dist/DeepCatalog-0.5.0-x86_64.AppImage
+./scripts/build-appimage.sh v0.6.0
+# dist/DeepCatalog-0.6.0-x86_64.AppImage
 ```
 
 ## Mockup mode
@@ -537,6 +564,7 @@ git checkout v0.5.0
 pip install -e ".[dev]" -c constraints.txt   # pytest, pytest-cov, ruff, mypy, pip-tools
 ./scripts/ci.sh                 # quality gate (format, lint, pip check, mypy, JS, Vitest, pytest+coverage)
 ./scripts/dependency-audit.sh   # pip-audit (OSV) + npm audit
+python scripts/chroma-advisory-watch.py  # unsuppressed Chroma/OSV watch (scheduled in CI)
 ./scripts/secret-scan.sh        # gitleaks (pinned binary, checksum-verified)
 ./scripts/sast-scan.sh          # Semgrep ERROR-severity (Python + JavaScript)
 ./scripts/precommit.sh          # secret guard + CI gate (also usable as a git hook)
@@ -568,12 +596,19 @@ Installers still call `pip install -r requirements.txt` / `requirements-desktop.
 
 Pull requests and pushes to `main` run [`.github/workflows/ci.yml`](.github/workflows/ci.yml) (`scripts/ci.sh` plus the reusable [security workflow](.github/workflows/security.yml): `pip-audit`/OSV + npm audit, gitleaks, Semgrep, and CodeQL). Version tags and published GitHub Releases run the same quality and security gates on the **exact tagged commit**, then pack the Linux AppImage and publish assets ([`.github/workflows/release.yml`](.github/workflows/release.yml)). Workflows pin Actions to full commit SHAs and grant `contents: write` only to the release publish job. Dependabot opens weekly PRs for GitHub Actions and pip, and monthly PRs for npm.
 
+`constraints.txt` pins `chromadb==1.5.9`. CVE-2026-45829 (pre-auth code injection) and CVE-2026-45833 (authenticated injection) affect Chroma **1.0.0–1.5.9** with **no patched release** as of 10 September 2026. Both target Chroma’s HTTP/FastAPI server, not the embedded client. DeepCatalog only constructs `PersistentClient` through [`deepcatalog/chroma_local.py`](deepcatalog/chroma_local.py) (explicit settings so `CHROMA_SERVER_*` / `CHROMA_API_IMPL` cannot switch the process to HTTP) and never starts a Chroma listener. PR/release `pip-audit` therefore ignores `PYSEC-2026-311` / `GHSA-f4j7-r4q5-qw2c`. A **separate** weekly job ([`.github/workflows/advisory-watch.yml`](.github/workflows/advisory-watch.yml), `scripts/chroma-advisory-watch.py`) runs the same OSV scan **without** those ignores and fails when a newer chromadb lands on PyPI or a non-Chroma advisory appears. Upgrade, fork, or replace Chroma when a fix exists; then drop the CI ignores.
+
 ### ADK agents (debug, localhost only)
 
-Production ingest and Ask do **not** use these agents. They exist for local `adk web` /
-`adk run` while developing. `adk web` already defaults to `127.0.0.1`. Do **not**
-pass `--host 0.0.0.0`, open the port on the LAN, or put it behind the DeepCatalog
-TLS proxy — the debug UI can invoke inbox/file/RAG tools through the model.
+Production ingest (`deepcatalog.ingest`) and Ask (`deepcatalog.ask`) do **not** use
+Google ADK tool agents. They call `complete_text` / `complete_with_images`. Ollama
+always goes through `trusted_ollama_origin()` (including the ADK debug factory in
+[`deepcatalog/adk_debug.py`](deepcatalog/adk_debug.py) — never a raw `OLLAMA_BASE_URL`).
+
+The ADK agents exist for local `adk web` / `adk run` while developing. `adk web`
+already defaults to `127.0.0.1`. Do **not** pass `--host 0.0.0.0`, open the port on
+the LAN, or put it behind the DeepCatalog TLS proxy — the debug UI can invoke
+inbox/file/RAG tools through the model.
 
 ```bash
 adk web --host 127.0.0.1 --port 8000
@@ -594,7 +629,8 @@ python scripts/watch_inbox.py --process-existing
 deepcatalog/       # ingest pipeline, review queue, dedup, updater, auth/llm helpers
   ingest.py            #   OCR → extract → name → review gate → file + index
   ocr.py               #   adaptive text-layer / vision OCR, PDF render, image prep
-  llm.py               #   OpenAI / Codex OAuth / Gemini / Ollama backends + cancel
+  llm.py               #   production OpenAI / Codex / Gemini / Ollama completions + cancel
+  adk_debug.py         #   local `adk web` / `adk run` only (not production ingest/Ask)
   prompt_safety.py     #   untrusted-content markers + output clamps
   providers/           #   LlmProvider interface (text, vision, embeddings, health, usage)
   progress.py          #   SSE progress + pipeline step labels/descriptions
@@ -603,8 +639,12 @@ deepcatalog/       # ingest pipeline, review queue, dedup, updater, auth/llm hel
   dedup.py             #   checksum + content-hash + similarity duplicate detection
   ollama_setup.py      #   Ollama probe, model pull, CPU/GPU summary, provider switch
   system_service.py    #   systemd user unit for boot autostart
+  chroma_local.py      #   embedded PersistentClient only (no Chroma HTTP server)
+  local_security.py    #   bind policy, token, Host allowlist (loopback is not auth)
+  api_token.py         #   generate/persist DEEPCATALOG_API_TOKEN on first launch
+  desktop_bootstrap.py #   one-time nonce for the native window session cookie
   serve.py             #   owned uvicorn entry (bind host + security policy stay aligned)
-  access_log.py        #   strip query strings from uvicorn access logs
+  access_log.py        #   strip query strings and bootstrap nonces from uvicorn logs
   auth_rate_limit.py   #   per-IP backoff for session exchange and failed token checks
   updater.py           #   self-update from GitHub releases
 query_agent/           # RAG Q&A agent
@@ -612,7 +652,7 @@ app/                   # FastAPI app (main.py + routers/) and ES-module UI (stat
   routers/             #   documents, reviews, settings, processing, auth, updates
   schemas.py           #   request/response models
   static/              #   api.js, inbox.js, review.js, settings.js, events.js, keyboard.js, pdf-preview.js, …
-scripts/               # install.sh, install.ps1, ci.sh, dependency-audit.sh, secret-scan.sh, sast-scan.sh, precommit.sh, watch_inbox.py, …
+scripts/               # install.sh, install.ps1, ci.sh, dependency-audit.sh, chroma-advisory-watch.py, secret-scan.sh, sast-scan.sh, precommit.sh, watch_inbox.py, …
 packaging/linux/       # AppImage AppRun, .desktop, icon
 tests/                 # pytest (Python) + tests/frontend (Vitest)
 docs/screenshots/      # README screenshots (generated with mockup mode)

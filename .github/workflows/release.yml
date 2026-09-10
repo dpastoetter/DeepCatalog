@@ -1,13 +1,17 @@
-# Release pipeline: quality → security (audit/secrets/SAST) → AppImage → publish.
+# Official assets are produced only by this workflow after quality + security.
 # Actions are pinned to full commit SHAs (see CI workflow for the same pins).
 #
-# Triggers:
-#   - push of a v* tag (git tag && git push --tags)
-#   - publishing a GitHub Release (UI or gh release create)
-#   - workflow_dispatch with an explicit tag (rebuild / attach assets)
+# Triggers (always run the full gated pipeline — never skip because assets exist):
+#   - push of a v* tag (git tag && git push --tags) — intended path
+#   - release published by a human/PAT — rebuilds and *replaces* any UI-uploaded assets
+#   - workflow_dispatch from the tag ref (not a branch) — rebuild
 #
 # GITHUB_TOKEN creating a release does not re-fire this workflow (GitHub loop guard).
-# A UI publish of a tag that already has an AppImage asset is skipped.
+#
+# Repo settings that are not expressible here (configure once):
+#   Environment "official-release": required reviewers; deployment tags v[0-9]*
+#   Prefer DEEPCATALOG_RELEASE_SIGNING_KEY as an environment secret on that env
+#   Ruleset on refs/tags/v*: block force-push/delete; restrict who can create tags
 
 name: Release
 
@@ -20,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to pack and publish (e.g. v0.3.0)"
+        description: "Tag to rebuild (must match the selected workflow tag ref)"
         required: true
         type: string
 
@@ -40,7 +44,6 @@ jobs:
       contents: read
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
-      pack: ${{ steps.resolve.outputs.pack }}
     steps:
       - name: Resolve tag
         id: resolve
@@ -49,37 +52,36 @@ jobs:
           TAG_PUSH: ${{ github.ref_name }}
           TAG_RELEASE: ${{ github.event.release.tag_name }}
           TAG_INPUT: ${{ inputs.tag }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           case "$EVENT" in
             release) TAG="$TAG_RELEASE" ;;
             workflow_dispatch) TAG="$TAG_INPUT" ;;
-            *) TAG="$TAG_PUSH" ;;
+            push) TAG="$TAG_PUSH" ;;
+            *)
+              echo "Unsupported event: ${EVENT}" >&2
+              exit 1
+              ;;
           esac
           TAG="${TAG#refs/tags/}"
           if [[ ! "$TAG" =~ ^v[0-9] ]]; then
             echo "Refusing to pack a non-version tag: ${TAG}" >&2
             exit 1
           fi
-          PACK=true
-          # Live check so a queued duplicate (tag push + UI publish) does not rebuild.
-          # workflow_dispatch always packs so a broken asset can be replaced.
-          if [ "$EVENT" != "workflow_dispatch" ] && gh release view "$TAG" >/dev/null 2>&1; then
-            assets="$(gh release view "$TAG" --json assets --jq '[.assets[].name] | join(",")')"
-            if echo "${assets:-}" | grep -q '\.AppImage'; then
-              echo "Release ${TAG} already has an AppImage — skipping duplicate pack"
-              PACK=false
-            fi
+          # The workflow YAML and sources must come from the tag being released.
+          # Dispatching from a branch with a modified pipeline cannot retarget a tag.
+          EXPECTED="refs/tags/${TAG}"
+          if [ "${GITHUB_REF}" != "${EXPECTED}" ]; then
+            echo "Release workflow must run on ${EXPECTED} (got ${GITHUB_REF})." >&2
+            echo "For workflow_dispatch, choose that tag under 'Use workflow from'." >&2
+            exit 1
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "pack=${PACK}" >> "$GITHUB_OUTPUT"
-          echo "event=${EVENT} tag=${TAG} pack=${PACK}"
+          echo "event=${EVENT} tag=${TAG} ref=${GITHUB_REF}"
 
   quality:
     name: Quality gate (tagged commit)
     needs: [context]
-    if: needs.context.outputs.pack == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -139,7 +141,6 @@ jobs:
   security:
     name: Security scans (tagged commit)
     needs: [context]
-    if: needs.context.outputs.pack == 'true'
     uses: ./.github/workflows/security.yml
     with:
       checkout_ref: ${{ needs.context.outputs.tag }}
@@ -150,7 +151,6 @@ jobs:
   appimage:
     name: Linux AppImage (x86_64)
     needs: [context, quality, security]
-    if: needs.context.outputs.pack == 'true'
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -209,10 +209,13 @@ jobs:
   release:
     name: Publish release
     needs: [context, quality, security, appimage]
-    if: needs.context.outputs.pack == 'true'
     runs-on: ubuntu-latest
+    environment:
+      name: official-release
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     env:
       RELEASE_TAG: ${{ needs.context.outputs.tag }}
     steps:
@@ -284,6 +287,36 @@ jobs:
           grep -F "${APPIMAGE}" dist/SHA256SUMS
           cat dist/SHA256SUMS
 
+      - name: Sign release manifest
+        env:
+          DEEPCATALOG_RELEASE_SIGNING_KEY: ${{ secrets.DEEPCATALOG_RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DEEPCATALOG_RELEASE_SIGNING_KEY:-}" ]; then
+            echo "DEEPCATALOG_RELEASE_SIGNING_KEY secret is required to publish a signed release." >&2
+            echo "This must be a separately protected Ed25519 key — not GITHUB_TOKEN." >&2
+            exit 1
+          fi
+          python -m pip install -U pip
+          pip install -c constraints.txt cryptography
+          python scripts/sign-release-manifest.py dist \
+            --tag "${RELEASE_TAG}" \
+            --commit "$(git rev-parse HEAD)"
+          test -s dist/release-manifest.json
+          test -s dist/release-manifest.json.sig
+
+      - name: Attest build provenance (SLSA)
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: |
+            dist/deepcatalog-*.tar.gz
+            dist/DeepCatalog-*-x86_64.AppImage
+            dist/release-manifest.json
+            dist/release-manifest.json.sig
+            dist/install.sh
+            dist/install.ps1
+            dist/SHA256SUMS
+
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -301,11 +334,25 @@ jobs:
           Built from commit \`${COMMIT_SHORT}\` (\`${COMMIT}\`) — ${FILE_COUNT} tracked files packed into the release archive.
 
           ### Assets
-          - \`deepcatalog-${VERSION}.tar.gz\` — full source archive for the in-app updater (SHA-256 verified)
+          - \`deepcatalog-${VERSION}.tar.gz\` — full source archive for the in-app updater
           - \`DeepCatalog-${VERSION}-x86_64.AppImage\` — Linux x86_64 desktop AppImage (glibc 2.35+)
+          - \`release-manifest.json\` / \`release-manifest.json.sig\` — Ed25519-signed artifact list (tag + commit bound)
           - \`install.sh\` — Linux/macOS one-line installer bootstrap
           - \`install.ps1\` — Windows PowerShell one-line installer bootstrap
-          - \`SHA256SUMS\` — checksums
+          - \`SHA256SUMS\` — checksums (not authentic on their own)
+
+          In-app updates require the signed manifest. Independently verify GitHub artifact attestations for *each* asset (tarball, AppImage, installers, manifest, checksums):
+
+          \`\`\`bash
+          gh attestation verify deepcatalog-${VERSION}.tar.gz \\
+            --repo dpastoetter/DeepCatalog \\
+            --cert-identity https://github.com/dpastoetter/DeepCatalog/.github/workflows/release.yml \\
+            --cert-oidc-issuer https://token.actions.githubusercontent.com
+          gh attestation verify install.sh \\
+            --repo dpastoetter/DeepCatalog \\
+            --cert-identity https://github.com/dpastoetter/DeepCatalog/.github/workflows/release.yml \\
+            --cert-oidc-issuer https://token.actions.githubusercontent.com
+          \`\`\`
 
           ### Install
           Linux AppImage:
@@ -329,11 +376,30 @@ jobs:
           # Strip the common leading indent from the heredoc body.
           sed -i 's/^          //' /tmp/release-notes.md
 
-          ASSETS=(dist/deepcatalog-"${VERSION}".tar.gz dist/DeepCatalog-"${VERSION}"-x86_64.AppImage dist/install.sh dist/install.ps1 dist/SHA256SUMS)
+          ASSETS=(
+            dist/deepcatalog-"${VERSION}".tar.gz
+            dist/DeepCatalog-"${VERSION}"-x86_64.AppImage
+            dist/release-manifest.json
+            dist/release-manifest.json.sig
+            dist/install.sh
+            dist/install.ps1
+            dist/SHA256SUMS
+          )
+          for asset in "${ASSETS[@]}"; do
+            test -s "$asset"
+          done
 
+          # This workflow is the only publisher of official assets. Strip anything
+          # a human or PAT already uploaded so a pre-populated release cannot survive.
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "${ASSETS[@]}" --clobber
-            gh release edit "$TAG" --notes-file /tmp/release-notes.md --target "$COMMIT"
+            mapfile -t existing < <(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null || true)
+            for name in "${existing[@]}"; do
+              if [ -n "$name" ]; then
+                gh release delete-asset "$TAG" "$name" --yes
+              fi
+            done
+            gh release upload "$TAG" "${ASSETS[@]}"
+            gh release edit "$TAG" --draft=false --notes-file /tmp/release-notes.md --target "$COMMIT"
           else
             gh release create "$TAG" "${ASSETS[@]}" \
               --title "$TAG" \

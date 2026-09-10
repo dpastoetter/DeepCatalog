@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from deepcatalog.ollama_url import (
     allow_remote_ollama_enabled,
     is_loopback_ollama_url,
+    ollama_client,
     trusted_ollama_origin,
 )
 
@@ -33,6 +34,10 @@ def running_as_appimage() -> bool:
 
 PROJECT_ROOT = resolve_project_root()
 DATA_DIR = Path(os.getenv("DATA_DIR", PROJECT_ROOT / "data")).expanduser().resolve()
+# Owner-only token and AppImage settings live here; project .env (already loaded) wins.
+_DATA_ENV = DATA_DIR / ".env"
+if _DATA_ENV.is_file():
+    load_dotenv(_DATA_ENV, override=False)
 INBOX_DIR = DATA_DIR / "inbox"
 ARCHIVE_DIR = DATA_DIR / "archive"
 DB_PATH = DATA_DIR / "deepcatalog.db"
@@ -45,13 +50,11 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip(
 def _ollama_reachable_quick(url: str) -> bool:
     """Short localhost probe used only during provider auto-detect."""
     try:
-        import httpx
-
         # Auto-detect must never SSRF: only probe loopback unless remote is opted in.
         if not is_loopback_ollama_url(url) and not allow_remote_ollama_enabled():
             return False
         origin = trusted_ollama_origin(url)
-        with httpx.Client(base_url=origin, timeout=0.6, follow_redirects=False) as client:
+        with ollama_client(origin=origin, timeout=0.6) as client:
             return client.get("/api/tags").is_success
     except Exception:  # noqa: BLE001 — auto-detect must never break startup
         return False

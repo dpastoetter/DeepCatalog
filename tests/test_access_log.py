@@ -18,6 +18,14 @@ def test_strip_query_for_log_removes_token_from_request_line():
     assert strip_query_for_log("/api/auth/session?token=abc&next=/") == "/api/auth/session"
     assert strip_query_for_log("GET /api/health HTTP/1.1") == "GET /api/health HTTP/1.1"
     assert strip_query_for_log("") == ""
+    assert (
+        strip_query_for_log("GET /api/auth/desktop-bootstrap/super-secret-nonce HTTP/1.1")
+        == "GET /api/auth/desktop-bootstrap/<redacted> HTTP/1.1"
+    )
+    assert (
+        strip_query_for_log("GET /api/auth/desktop-bootstrap/super-secret-nonce?desktop=1 HTTP/1.1")
+        == "GET /api/auth/desktop-bootstrap/<redacted> HTTP/1.1"
+    )
 
 
 def test_access_log_filter_redacts_args_and_message():

@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from tests.conftest import apply_test_client_auth
 
-from app.main import CSRF_HEADER_NAME, CSRF_HEADER_VALUE, app
+from app.main import app
 from deepcatalog.config import ensure_data_dirs
 from deepcatalog.settings import (
     clear_settings_cache,
@@ -154,7 +155,7 @@ def test_clear_all_data_api_requires_confirmation(tmp_path, monkeypatch):
     _isolate_data(tmp_path, monkeypatch)
 
     client = TestClient(app)
-    client.headers.update({CSRF_HEADER_NAME: CSRF_HEADER_VALUE})
+    apply_test_client_auth(client)
 
     denied = client.request("DELETE", "/api/data", json={"confirmation": "yes"})
     assert denied.status_code == 400

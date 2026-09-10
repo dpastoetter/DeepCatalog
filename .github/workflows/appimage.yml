@@ -1,5 +1,5 @@
-# Manual Linux AppImage build (no GitHub Release).
-# Actions are pinned to full commit SHAs (see CI workflow for the same pins).
+# Manual Linux AppImage build (Actions artifact only — never a GitHub Release).
+# Official AppImages are published solely by the Release workflow after quality/security.
 
 name: AppImage
 

@@ -1,4 +1,4 @@
-"""Redact query strings from HTTP access logs so secrets never hit disk."""
+"""Redact query strings and desktop-bootstrap nonces from HTTP access logs."""
 
 from __future__ import annotations
 
@@ -7,15 +7,27 @@ import re
 
 # Uvicorn access lines look like: GET /api/inbox?token=secret HTTP/1.1
 _QUERY_IN_REQUEST_LINE = re.compile(r"\?([^ \t]*)")
+_BOOTSTRAP_IN_REQUEST_LINE = re.compile(
+    r"(/api/auth/desktop-bootstrap/)([^ \t?]+)",
+    flags=re.IGNORECASE,
+)
 
 _installed = False
 
 
+def redact_access_log_value(value: str) -> str:
+    """Remove query strings and desktop-bootstrap nonces from a URL or request line."""
+    if not value:
+        return value
+    redacted = _BOOTSTRAP_IN_REQUEST_LINE.sub(r"\1<redacted>", value)
+    if "?" not in redacted:
+        return redacted
+    return _QUERY_IN_REQUEST_LINE.sub("", redacted)
+
+
 def strip_query_for_log(value: str) -> str:
     """Remove query strings from a URL or HTTP request line."""
-    if not value or "?" not in value:
-        return value
-    return _QUERY_IN_REQUEST_LINE.sub("", value)
+    return redact_access_log_value(value)
 
 
 class AccessLogQueryFilter(logging.Filter):

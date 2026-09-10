@@ -21,6 +21,7 @@ import httpx
 import uvicorn
 from dotenv import load_dotenv
 
+from deepcatalog.desktop_bootstrap import mint_desktop_bootstrap
 from deepcatalog.env_permissions import harden_secret_file, write_secret_text
 from deepcatalog.local_security import (
     assert_bind_allowed,
@@ -633,8 +634,10 @@ def install_linux_desktop_entry() -> Path | None:
     return dest
 
 
-def desktop_ui_url(host: str, port: int) -> str:
+def desktop_ui_url(host: str, port: int, *, bootstrap_nonce: str | None = None) -> str:
     """Local UI URL with desktop=1 so the SPA uses app chrome, not website chrome."""
+    if bootstrap_nonce:
+        return f"http://{host}:{port}/api/auth/desktop-bootstrap/{bootstrap_nonce}?desktop=1"
     return f"http://{host}:{port}/?desktop=1"
 
 
@@ -934,8 +937,8 @@ def run_desktop(
                 _stop_uvicorn(owned_server)
             raise
 
-    url = desktop_ui_url(host, active_port)
     if not headless:
+        url = desktop_ui_url(host, active_port, bootstrap_nonce=mint_desktop_bootstrap())
         ui_closed = _launch_ui_window(url, data_dir=data_dir, width=width, height=height)
         if ui_closed:
             if owned_server is not None:

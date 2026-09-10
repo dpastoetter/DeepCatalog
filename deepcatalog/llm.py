@@ -1,4 +1,10 @@
-"""Provider-aware LLM model factory for ADK agents."""
+"""Production LLM completions (ingest / Ask) plus an ADK debug model factory.
+
+Production paths (`complete_text`, `complete_with_images`) never use ADK tool
+agents. Ollama traffic goes through `trusted_ollama_origin` and
+`ollama_async_client`. `get_adk_debug_model` is for local `adk web` / `adk run`
+only — see `deepcatalog.adk_debug`.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +13,7 @@ import base64
 import contextlib
 import os
 from collections.abc import AsyncGenerator
+from functools import cached_property
 from typing import Any
 
 import httpx
@@ -28,7 +35,14 @@ from deepcatalog.ollama_setup import (
     format_http_error,
     resolve_runtime_model,
 )
-from deepcatalog.ollama_url import trusted_ollama_origin
+from deepcatalog.ollama_url import (
+    allow_remote_ollama_enabled,
+    apply_openai_compat_env_for_ollama,
+    ollama_async_client,
+    ollama_openai_compatible_base_url,
+    ollama_pinned_async_http_client,
+    trusted_ollama_origin,
+)
 from deepcatalog.usage import (
     normalize_gemini_usage,
     normalize_ollama_usage,
@@ -170,24 +184,39 @@ def _build_codex_responses_llm(model_name: str) -> CodexResponsesLlm:
     return CodexResponsesLlm(model=model_name, client=client, store=False)
 
 
-def get_model() -> Any:
-    """
-    Return the ADK model object/string for the configured provider.
+class _AdkOllamaOpenAILlm(OpenAILlm):
+    """ADK `adk web` only. Production Ollama uses `_complete_ollama`."""
 
-    - gemini: model name string (uses GOOGLE_API_KEY)
-    - openai + API key: OpenAILlm (api.openai.com)
-    - openai + ChatGPT OAuth: CodexResponsesLlm via Codex backend
-    - ollama: OpenAILlm against Ollama's OpenAI-compatible endpoint
+    @cached_property
+    def _openai_client(self) -> AsyncOpenAI:
+        allow_remote = allow_remote_ollama_enabled()
+        base_url = ollama_openai_compatible_base_url(
+            config.OLLAMA_BASE_URL, allow_remote=allow_remote
+        )
+        return AsyncOpenAI(
+            api_key=os.environ.get("OPENAI_API_KEY") or "ollama",
+            base_url=base_url,
+            http_client=ollama_pinned_async_http_client(timeout=OLLAMA_CHAT_TIMEOUT),
+            timeout=OLLAMA_CHAT_TIMEOUT,
+            max_retries=2,
+        )
+
+
+def get_adk_debug_model() -> Any:
+    """
+    Return the Google ADK model object for local `adk web` / `adk run` only.
+
+    Production ingest and Ask call `complete_text` / `complete_with_images` and
+    never this factory. Ollama still goes through `trusted_ollama_origin` so a
+    later refactor cannot point OpenAILlm at a raw `OLLAMA_BASE_URL`.
     """
     model_name = resolve_model_name()
     if config.LLM_PROVIDER == "ollama":
-        # OpenAILlm builds its AsyncOpenAI() from env; point it at Ollama's
-        # OpenAI-compatible endpoint (any non-empty api key is accepted).
-        # Readiness is checked at request time in _complete_ollama / embeddings.
-        os.environ["OPENAI_BASE_URL"] = f"{config.OLLAMA_BASE_URL}/v1"
-        if not os.environ.get("OPENAI_API_KEY"):
-            os.environ["OPENAI_API_KEY"] = "ollama"
-        return OpenAILlm(model=resolve_runtime_model(model_name))
+        apply_openai_compat_env_for_ollama(
+            config.OLLAMA_BASE_URL,
+            allow_remote=allow_remote_ollama_enabled(),
+        )
+        return _AdkOllamaOpenAILlm(model=resolve_runtime_model(model_name))
     if config.LLM_PROVIDER != "openai":
         return model_name
 
@@ -199,6 +228,11 @@ def get_model() -> Any:
     if key:
         os.environ["OPENAI_API_KEY"] = key
     return OpenAILlm(model=model_name)
+
+
+def get_model() -> Any:
+    """Deprecated alias for `get_adk_debug_model` (ADK debug only)."""
+    return get_adk_debug_model()
 
 
 def _record_openai_response(provider: str, model_name: str, response: Any) -> None:
@@ -372,11 +406,7 @@ async def _ollama_request(
     model = str(payload.get("model") or config.MODEL_NAME)
     origin = trusted_ollama_origin(config.OLLAMA_BASE_URL)
     request_timeout = timeout if timeout is not None else OLLAMA_CHAT_TIMEOUT
-    client = httpx.AsyncClient(
-        base_url=origin,
-        timeout=request_timeout,
-        follow_redirects=False,
-    )
+    client = ollama_async_client(origin=origin, timeout=request_timeout)
     try:
         post_task = asyncio.create_task(client.post("/api/chat", json=payload))
         if cancel_event is not None:

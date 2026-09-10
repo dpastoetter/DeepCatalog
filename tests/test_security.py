@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 
 from fastapi.testclient import TestClient
+from tests.conftest import apply_test_client_auth
 
-from app.main import app
+from app.main import CSRF_HEADER_NAME, app
 from deepcatalog.pipeline.agents import file_and_persist
 from deepcatalog.review import create_review
 from deepcatalog.settings import get_source_dir
@@ -16,6 +17,9 @@ from deepcatalog.tools.metadata_db import get_document, list_recent
 
 def test_mutating_routes_require_csrf_header(isolated_data):
     bare = TestClient(app)
+    apply_test_client_auth(bare)
+    # Drop CSRF so we isolate the header check from Bearer auth.
+    bare.headers.pop(CSRF_HEADER_NAME, None)
     # Body-less POSTs are the classic CSRF vector for local unauthenticated APIs.
     for path in (
         "/api/process-inbox",
@@ -48,6 +52,8 @@ def test_csrf_same_origin_browser_post_allows_upload(isolated_data):
     from tests.media_fixtures import minimal_pdf_bytes
 
     bare = TestClient(app)
+    apply_test_client_auth(bare)
+    bare.headers.pop(CSRF_HEADER_NAME, None)
     resp = bare.post(
         "/api/upload",
         files={"file": ("scan.pdf", minimal_pdf_bytes(), "application/pdf")},
@@ -62,12 +68,16 @@ def test_csrf_same_origin_browser_post_allows_upload(isolated_data):
 
 def test_csrf_matching_origin_without_fetch_metadata_allows_mutation(isolated_data):
     bare = TestClient(app)
+    apply_test_client_auth(bare)
+    bare.headers.pop(CSRF_HEADER_NAME, None)
     resp = bare.post("/api/process-inbox", headers={"Origin": "http://testserver"})
     assert resp.status_code == 200
 
 
 def test_csrf_cross_site_origin_is_blocked(isolated_data):
     bare = TestClient(app)
+    apply_test_client_auth(bare)
+    bare.headers.pop(CSRF_HEADER_NAME, None)
     resp = bare.post(
         "/api/process-inbox",
         headers={"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"},

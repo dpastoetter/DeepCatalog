@@ -272,7 +272,9 @@ function showUpdateButtons({ apply = false, restart = false } = {}) {
 }
 
 export function updateApplyAllowed(data) {
-  return Boolean(data?.update_available && data?.verifiable && data?.installable !== false);
+  return Boolean(
+    data?.update_available && data?.signed && data?.verifiable && data?.installable !== false,
+  );
 }
 
 export async function refreshUpdateVersion() {
@@ -367,6 +369,8 @@ export function settingsShellHtml() {
               </label>
               <p class="fine">
                 Remote Ollama sends page images and text to that host — same privacy rules as cloud AI.
+                Prefer a literal IP. Hostnames must also be listed in
+                <code>DEEPCATALOG_OLLAMA_ALLOWED_HOSTS</code> so DNS cannot retarget the connection.
                 Approve the disclaimer below before enabling.
               </p>
             </div>
@@ -614,7 +618,7 @@ export function settingsShellHtml() {
               <button id="update-restart" type="button" class="btn primary hidden">Restart now</button>
             </div>
           </div>
-          <p class="fine">Updates are downloaded from <a id="update-repo-link" class="text-link" href="#" target="_blank" rel="noopener">GitHub</a>. Your documents, settings, and credentials are kept.</p>
+          <p class="fine">Updates are downloaded from <a id="update-repo-link" class="text-link" href="#" target="_blank" rel="noopener">GitHub</a> and installed only when a signed release manifest matches this build's verify key. Your documents, settings, and credentials are kept.</p>
           <pre id="update-notes" class="out hidden"></pre>
         </section>
 
@@ -1060,14 +1064,14 @@ export function initSettings() {
           showUpdateButtons({});
         } else if (updateApplyAllowed(data)) {
           setUpdateStatus(
-            `Update available: v${data.current_version} → v${data.latest_version} (SHA-256 verified)`,
+            `Update available: v${data.current_version} → v${data.latest_version} (signed manifest verified)`,
             "warn",
           );
           showUpdateButtons({ apply: true });
         } else {
           setUpdateStatus(
             data.verification_error ||
-              `v${data.latest_version} is available but has no SHA-256 release assets — install refused`,
+              `v${data.latest_version} is available but is not signed — install refused`,
             "err",
           );
           showUpdateButtons({});
@@ -1097,7 +1101,7 @@ export function initSettings() {
     try {
       const data = await api("/api/update/apply", { method: "POST" });
       setUpdateStatus(
-        `Installed v${data.installed_version} (${data.updated_count} files, checksum ok) — restart to finish`,
+        `Installed v${data.installed_version} (${data.updated_count} files, signed) — restart to finish`,
         "ok",
       );
       toast(`Updated to v${data.installed_version}`, "ok");

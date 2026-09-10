@@ -12,11 +12,11 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.deps import (
-    AUTH_EXEMPT_PATHS,
     CSRF_HEADER_NAME,
     CSRF_HEADER_VALUE,
     MAX_UPLOAD_BYTES,
     MUTATING_METHODS,
+    path_is_auth_exempt,
     peer_host,
     rate_limit_ip,
     request_has_valid_token,
@@ -27,6 +27,7 @@ from app.deps import (
 from app.routers import build_api_router
 from app.security_headers import DESKTOP_CONTENT_SECURITY_POLICY, apply_browser_security_headers
 from deepcatalog.access_log import install_access_log_redaction
+from deepcatalog.api_token import ensure_api_token
 from deepcatalog.auth_rate_limit import (
     RATE_LIMIT_DETAIL,
     get_auth_rate_limiter,
@@ -45,6 +46,7 @@ from deepcatalog.local_security import (
     host_header_allowed,
     is_direct_loopback_request,
     remote_auth_must_be_https,
+    single_user_desktop_enabled,
 )
 from deepcatalog.review import recover_stale_processing
 from deepcatalog.sessions import (
@@ -70,6 +72,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(_app: FastAPI):
     ensure_data_dirs()
     ensure_dotenv_permissions(fix=True)
+    ensure_api_token()
     install_access_log_redaction()
     assert_bind_allowed(effective_bind_host())
     load_settings()
@@ -132,7 +135,7 @@ async def security_boundary(request: Request, call_next):
             )
         )
 
-    needs_auth = path.startswith("/api/") and path not in AUTH_EXEMPT_PATHS
+    needs_auth = path.startswith("/api/") and not path_is_auth_exempt(path)
     if needs_auth and auth_required_for_request(
         peer_host=tcp_peer,
         host_header=request.headers.get("host"),
@@ -143,8 +146,9 @@ async def security_boundary(request: Request, call_next):
                     status_code=403,
                     content={
                         "detail": (
-                            "non-loopback API access requires DEEPCATALOG_API_TOKEN "
-                            "(refuse to expose the unauthenticated API on the network)"
+                            "API access requires DEEPCATALOG_API_TOKEN "
+                            "(loopback is not an authentication boundary; "
+                            "set DEEPCATALOG_SINGLE_USER=1 only on a dedicated machine)"
                         )
                     },
                 )
@@ -207,10 +211,11 @@ def index(request: Request) -> HTMLResponse:
     """
     Serve the SPA.
 
-    Never injects DEEPCATALOG_API_TOKEN into HTML/JS. Issues a random HttpOnly
-    session cookie only for a genuine direct loopback connection (loopback TCP
-    peer and loopback Host, not via a trusted proxy). Proxied/public clients
-    must use POST /api/auth/session. Query-string tokens are not accepted.
+    Never injects DEEPCATALOG_API_TOKEN into HTML/JS. Does not treat loopback as
+    logged-in: other local accounts can reach 127.0.0.1. A session cookie is
+    issued here only when DEEPCATALOG_SINGLE_USER=1 (dedicated machine). The
+    desktop window uses a one-time bootstrap nonce instead. Other browsers use
+    POST /api/auth/session. Query-string tokens are not accepted.
     """
     expected = get_api_token()
     existing = request.cookies.get(COOKIE_NAME)
@@ -218,9 +223,13 @@ def index(request: Request) -> HTMLResponse:
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     response = HTMLResponse(html)
 
-    if expected and is_direct_loopback_request(
-        peer_host=peer_host(request),
-        host_header=request.headers.get("host"),
+    if (
+        expected
+        and single_user_desktop_enabled()
+        and is_direct_loopback_request(
+            peer_host=peer_host(request),
+            host_header=request.headers.get("host"),
+        )
     ):
         if not session_is_valid(existing):
             attach_session_cookie(response, create_session(), secure=request_is_https(request))

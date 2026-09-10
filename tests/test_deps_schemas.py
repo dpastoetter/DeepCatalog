@@ -6,7 +6,7 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from app.deps import archive_roots, is_within, require_cloud_disclaimer_or_403
+from app.deps import archive_roots, is_within, path_is_auth_exempt, require_cloud_disclaimer_or_403
 from app.schemas import AskRequest, OcrSetting, SettingsRequest
 
 
@@ -18,6 +18,14 @@ def test_is_within_basic(tmp_path):
     child.write_text("x")
     assert is_within(child.resolve(), root.resolve()) is True
     assert is_within((tmp_path / "other").resolve(), root.resolve()) is False
+
+
+def test_path_is_auth_exempt():
+    assert path_is_auth_exempt("/api/health") is True
+    assert path_is_auth_exempt("/api/auth/session") is True
+    assert path_is_auth_exempt("/api/inbox") is False
+    assert path_is_auth_exempt("/api/auth/desktop-bootstrap/abc") is True
+    assert path_is_auth_exempt("/api/auth/desktop-bootstrap") is False
 
 
 def test_archive_roots_includes_categories(isolated_data):

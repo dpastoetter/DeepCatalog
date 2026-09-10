@@ -23,20 +23,33 @@ describe("setupStatusLine", () => {
 });
 
 describe("updateApplyAllowed", () => {
-  it("allows apply for a verifiable source install", () => {
+  it("allows apply for a signed source install", () => {
     expect(
       updateApplyAllowed({
         update_available: true,
+        signed: true,
         verifiable: true,
         installable: true,
       }),
     ).toBe(true);
   });
 
+  it("hides apply when the release is only checksummed", () => {
+    expect(
+      updateApplyAllowed({
+        update_available: true,
+        signed: false,
+        verifiable: true,
+        installable: true,
+      }),
+    ).toBe(false);
+  });
+
   it("hides apply for AppImage installs", () => {
     expect(
       updateApplyAllowed({
         update_available: true,
+        signed: true,
         verifiable: true,
         installable: false,
       }),
