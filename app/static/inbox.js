@@ -6,6 +6,7 @@ import {
   setText,
   toast,
 } from "./api.js";
+import { ingestDesktopUriDrop } from "./desktop-shell.js";
 import { hooks, workflowState } from "./state.js";
 import { patchQueueRow } from "./events.js";
 
@@ -20,6 +21,28 @@ export const SUPPORTED_UPLOAD_SUFFIXES = new Set([
   ".tiff",
   ".bmp",
 ]);
+/** File picker types. Avoid `image/*` — WebKitGTK/GNOME portals then hide PDFs. */
+export const UPLOAD_ACCEPT =
+  "application/pdf,.pdf,image/png,image/jpeg,image/webp,image/tiff,image/bmp,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp";
+
+export function uploadRequestInit(file) {
+  const filename = String(file?.name || "scan.bin");
+  return {
+    method: "POST",
+    headers: {
+      "X-File-Name": encodeURIComponent(filename),
+      "Content-Type": file?.type || "application/octet-stream",
+    },
+    body: file,
+  };
+}
+
+export function fileInputAcceptAttribute() {
+  if (typeof document !== "undefined" && document.documentElement.classList.contains("dc-desktop")) {
+    return "";
+  }
+  return UPLOAD_ACCEPT;
+}
 
 /** @typedef {"waiting"|"uploading"|"uploaded"|"error"} StageStatus */
 /** @typedef {{ id: string, file: File, name: string, size: number, type: string, lastModified: number, status: StageStatus, error?: string }} StagedFile */
@@ -34,6 +57,8 @@ const state = {
 };
 
 export function inboxShellHtml() {
+  const accept = fileInputAcceptAttribute();
+  const acceptAttr = accept ? ` accept="${accept}"` : "";
   return `<div class="inbox-grid">
           <section class="card inbox-add">
             <h2 class="card-title">
@@ -42,7 +67,7 @@ export function inboxShellHtml() {
             </h2>
             <form id="upload-form" class="upload" aria-label="Add scans to inbox">
               <div class="drop-zone" id="drop-zone" data-state="idle">
-                <input type="file" id="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,.bmp,image/*" multiple />
+                <input type="file" id="file"${acceptAttr} multiple />
                 <label class="drop-visual" for="file">
                   <span class="drop-mark" aria-hidden="true">+</span>
                   <span class="drop-cue">Drop scans or browse</span>
@@ -404,10 +429,8 @@ async function uploadOne(item) {
   item.status = "uploading";
   item.error = undefined;
   renderStaging();
-  const body = new FormData();
-  body.append("file", item.file);
   try {
-    await api("/api/upload", { method: "POST", body });
+    await api("/api/upload", uploadRequestInit(item.file));
     item.status = "uploaded";
   } catch (err) {
     item.status = "error";
@@ -525,9 +548,11 @@ export function initInbox() {
     });
     dropZone.addEventListener("drop", (e) => {
       e.preventDefault();
+      e.stopPropagation();
       state.dragDepth = 0;
       dropZoneState();
       if (e.dataTransfer?.files?.length) ingestFileList(e.dataTransfer.files);
+      else ingestDesktopUriDrop(e).catch(() => {});
     });
   }
 
@@ -564,6 +589,19 @@ export function initInbox() {
       setText("inbox-out", msg);
       setProcessStatus(msg, "error");
     });
+  });
+
+  window.addEventListener("dc-desktop-drop", (event) => {
+    const detail = event.detail || {};
+    const ok = Array.isArray(detail.ok) ? detail.ok : [];
+    const errors = Array.isArray(detail.errors) ? detail.errors : [];
+    if (ok.length) {
+      toast(`Added ${ok.length} scan${ok.length === 1 ? "" : "s"} to inbox`, "ok");
+      refreshInbox().catch(() => {});
+    }
+    if (errors.length) {
+      toast(errors.slice(0, 2).join(" · "), "warn");
+    }
   });
 
   document.getElementById("clear-inbox")?.addEventListener("click", async (e) => {

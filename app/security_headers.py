@@ -7,9 +7,8 @@ from typing import Any
 # Strict CSP for the local SPA. No third-party origins; no unsafe-inline.
 # connect-src covers same-origin fetch + SSE. img blob:/data: for local previews.
 # worker-src 'self' for PDF.js preview worker (same-origin vendor bundle).
-CONTENT_SECURITY_POLICY = (
+_CSP_CORE = (
     "default-src 'self'; "
-    "script-src 'self'; "
     "style-src 'self'; "
     "img-src 'self' blob: data:; "
     "font-src 'self'; "
@@ -22,6 +21,9 @@ CONTENT_SECURITY_POLICY = (
     "worker-src 'self'; "
     "manifest-src 'self'"
 )
+CONTENT_SECURITY_POLICY = f"script-src 'self'; {_CSP_CORE}"
+# pywebview injects its JS bridge with evaluate_javascript (needs unsafe-eval).
+DESKTOP_CONTENT_SECURITY_POLICY = f"script-src 'self' 'unsafe-eval'; {_CSP_CORE}"
 
 PERMISSIONS_POLICY = (
     "accelerometer=(), "

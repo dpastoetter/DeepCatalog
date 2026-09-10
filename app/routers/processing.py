@@ -6,9 +6,11 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from starlette.datastructures import UploadFile
 
 from app.deps import MAX_UPLOAD_BYTES
 from app.schemas import ProcessCancelRequest, ProcessRequest, ProcessRetryRequest
@@ -31,21 +33,47 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["processing"])
 
 
-@router.get("/api/inbox")
-def api_inbox() -> dict[str, Any]:
-    return list_inbox()
+class RequestBodyReader:
+    """Expose ``request.stream()`` as the async ``read()`` used by inbox streaming."""
+
+    def __init__(self, request: Request) -> None:
+        self._iterator = request.stream().__aiter__()
+        self._buffer = b""
+        self._done = False
+
+    async def read(self, size: int = -1) -> bytes:
+        if size == 0:
+            return b""
+        if size < 0:
+            chunks = [self._buffer]
+            self._buffer = b""
+            while not self._done:
+                try:
+                    chunks.append(await self._iterator.__anext__())
+                except StopAsyncIteration:
+                    self._done = True
+            return b"".join(chunks)
+        while len(self._buffer) < size and not self._done:
+            try:
+                self._buffer += await self._iterator.__anext__()
+            except StopAsyncIteration:
+                self._done = True
+        out = self._buffer[:size]
+        self._buffer = self._buffer[size:]
+        return out
 
 
-@router.delete("/api/inbox")
-def api_clear_inbox() -> dict[str, Any]:
-    return clear_inbox()
+def upload_filename_from_request(request: Request) -> str:
+    raw = (request.headers.get("x-file-name") or request.query_params.get("filename") or "").strip()
+    if not raw:
+        return ""
+    return Path(unquote(raw)).name
 
 
-@router.post("/api/upload")
-async def api_upload(file: UploadFile = File(...)) -> dict[str, Any]:
-    if not file.filename:
+async def persist_inbox_upload(filename: str, upload: Any) -> dict[str, Any]:
+    if not filename:
         raise HTTPException(status_code=400, detail="filename required")
-    suffix = Path(file.filename).suffix.lower()
+    suffix = Path(filename).suffix.lower()
     if suffix not in SUPPORTED_SUFFIXES:
         raise HTTPException(
             status_code=415,
@@ -54,15 +82,12 @@ async def api_upload(file: UploadFile = File(...)) -> dict[str, Any]:
         )
     try:
         saved = await stream_upload_to_inbox(
-            file.filename,
-            file,
+            filename,
+            upload,
             max_bytes=MAX_UPLOAD_BYTES,
         )
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"could not save file: {exc}") from exc
-    finally:
-        await file.close()
-
     if saved.get("status") != "success":
         code = saved.get("code")
         detail = saved.get("error", "upload failed")
@@ -84,6 +109,39 @@ async def api_upload(file: UploadFile = File(...)) -> dict[str, Any]:
             raise HTTPException(status_code=415, detail=detail)
         raise HTTPException(status_code=400, detail=detail)
     return saved
+
+
+@router.get("/api/inbox")
+def api_inbox() -> dict[str, Any]:
+    return list_inbox()
+
+
+@router.delete("/api/inbox")
+def api_clear_inbox() -> dict[str, Any]:
+    return clear_inbox()
+
+
+@router.post("/api/upload")
+async def api_upload(request: Request) -> dict[str, Any]:
+    """
+    Multipart ``file`` field, or a raw body with ``X-File-Name``.
+
+    WebKitGTK drops custom headers on ``FormData`` fetch, so the desktop
+    shell sends the scan as the request body instead of multipart.
+    """
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        upload = form.get("file")
+        if not isinstance(upload, UploadFile):
+            raise HTTPException(status_code=400, detail="filename required")
+        filename = upload.filename or ""
+        try:
+            return await persist_inbox_upload(filename, upload)
+        finally:
+            await upload.close()
+    filename = upload_filename_from_request(request)
+    return await persist_inbox_upload(filename, RequestBodyReader(request))
 
 
 @router.post("/api/process")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import HTTPException, Request
 
@@ -13,6 +14,7 @@ from deepcatalog.local_security import (
     extract_bearer_token,
     forwarded_client_host,
     get_api_token,
+    host_header_allowed,
     request_appears_https,
     token_matches,
 )
@@ -36,6 +38,41 @@ AUTH_EXEMPT_PATHS = frozenset(
 )
 
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # generous cap for large scans
+
+
+def origin_matches_host_header(origin: str, host_header: str | None) -> bool:
+    """True when Origin is http(s) and its host[:port] equals the Host header."""
+    origin = (origin or "").strip()
+    host_header = (host_header or "").strip()
+    if not origin or not host_header:
+        return False
+    try:
+        parsed = urlparse(origin)
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if parsed.username or parsed.password:
+        return False
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        return False
+    authority = (parsed.netloc or "").strip().lower()
+    if not authority or authority != host_header.lower():
+        return False
+    return host_header_allowed(host_header)
+
+
+def request_passes_csrf(request: Request) -> bool:
+    """Custom header, or a same-origin browser POST (WebKitGTK drops FormData headers)."""
+    if request.headers.get(CSRF_HEADER_NAME) == CSRF_HEADER_VALUE:
+        return True
+    site = (request.headers.get("sec-fetch-site") or "").strip().lower()
+    if site in {"same-origin", "same-site"}:
+        return True
+    return origin_matches_host_header(
+        request.headers.get("origin") or "",
+        request.headers.get("host"),
+    )
 
 
 def peer_host(request: Request) -> str | None:

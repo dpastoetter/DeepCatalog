@@ -44,6 +44,49 @@ def test_csrf_header_allows_mutation(client):
     assert resp.json()["status"] in {"empty", "success", "partial"}
 
 
+def test_csrf_same_origin_browser_post_allows_upload(isolated_data):
+    from tests.media_fixtures import minimal_pdf_bytes
+
+    bare = TestClient(app)
+    resp = bare.post(
+        "/api/upload",
+        files={"file": ("scan.pdf", minimal_pdf_bytes(), "application/pdf")},
+        headers={
+            "Origin": "http://testserver",
+            "Sec-Fetch-Site": "same-origin",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["filename"] == "scan.pdf"
+
+
+def test_csrf_matching_origin_without_fetch_metadata_allows_mutation(isolated_data):
+    bare = TestClient(app)
+    resp = bare.post("/api/process-inbox", headers={"Origin": "http://testserver"})
+    assert resp.status_code == 200
+
+
+def test_csrf_cross_site_origin_is_blocked(isolated_data):
+    bare = TestClient(app)
+    resp = bare.post(
+        "/api/process-inbox",
+        headers={"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"},
+    )
+    assert resp.status_code == 403
+    assert "cross-site" in resp.json()["detail"]
+
+
+def test_origin_matches_host_header():
+    from app.deps import origin_matches_host_header
+
+    assert origin_matches_host_header("http://127.0.0.1:8080", "127.0.0.1:8080")
+    assert origin_matches_host_header("http://testserver", "testserver")
+    assert not origin_matches_host_header("https://evil.example", "127.0.0.1:8080")
+    assert not origin_matches_host_header("http://user@127.0.0.1:8080", "127.0.0.1:8080")
+    assert not origin_matches_host_header("null", "127.0.0.1:8080")
+    assert not origin_matches_host_header("", "127.0.0.1:8080")
+
+
 def test_process_rejects_paths_outside_inbox(client, isolated_data):
     secret = isolated_data.parent / "secret.txt"
     secret.write_text("credentials")
@@ -82,6 +125,23 @@ def test_upload_accepts_pdf(client):
     assert resp.status_code == 200
     assert resp.json()["filename"] == "scan.pdf"
     assert (get_source_dir() / "scan.pdf").exists()
+
+
+def test_upload_accepts_raw_body_with_filename_header(client):
+    from tests.media_fixtures import minimal_pdf_bytes
+
+    payload = minimal_pdf_bytes()
+    resp = client.post(
+        "/api/upload",
+        content=payload,
+        headers={
+            "Content-Type": "application/pdf",
+            "X-File-Name": "raw.pdf",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["filename"] == "raw.pdf"
+    assert (get_source_dir() / "raw.pdf").exists()
 
 
 def test_upload_rejects_oversize_without_leaving_partial(client, monkeypatch):

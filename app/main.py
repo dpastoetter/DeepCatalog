@@ -21,10 +21,11 @@ from app.deps import (
     rate_limit_ip,
     request_has_valid_token,
     request_is_https,
+    request_passes_csrf,
     request_presents_credentials,
 )
 from app.routers import build_api_router
-from app.security_headers import apply_browser_security_headers
+from app.security_headers import DESKTOP_CONTENT_SECURITY_POLICY, apply_browser_security_headers
 from deepcatalog.access_log import install_access_log_redaction
 from deepcatalog.auth_rate_limit import (
     RATE_LIMIT_DETAIL,
@@ -178,7 +179,7 @@ async def security_boundary(request: Request, call_next):
     if (
         request.method in MUTATING_METHODS
         and path.startswith("/api/")
-        and request.headers.get(CSRF_HEADER_NAME) != CSRF_HEADER_VALUE
+        and not request_passes_csrf(request)
     ):
         return apply_browser_security_headers(
             JSONResponse(
@@ -192,7 +193,10 @@ async def security_boundary(request: Request, call_next):
     response = await call_next(request)
     if path == "/" or path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
-    return apply_browser_security_headers(response)
+    response = apply_browser_security_headers(response)
+    if request.query_params.get("desktop") == "1":
+        response.headers["Content-Security-Policy"] = DESKTOP_CONTENT_SECURITY_POLICY
+    return response
 
 
 app.include_router(build_api_router())

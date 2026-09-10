@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   applyDesktopShellClass,
+  dropEventToUriPayload,
   initDesktopShell,
+  ingestDesktopUriDrop,
   isBrowserChromeShortcut,
   isDesktopShell,
   isExternalHttpUrl,
@@ -70,6 +72,56 @@ describe("initDesktopShell", () => {
     const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
     document.body.dispatchEvent(event);
     expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("prevents WebKit from navigating when files are dropped on the window", () => {
+    initDesktopShell();
+    const over = new Event("dragover", { bubbles: true, cancelable: true });
+    const drop = new Event("drop", { bubbles: true, cancelable: true });
+    document.body.dispatchEvent(over);
+    document.body.dispatchEvent(drop);
+    expect(over.defaultPrevented).toBe(true);
+    expect(drop.defaultPrevented).toBe(true);
+  });
+});
+
+describe("file-manager drops", () => {
+  it("reads Nautilus uri-list and gnome copied-files payloads", () => {
+    const event = {
+      dataTransfer: {
+        getData: (type) => {
+          if (type === "text/uri-list") return "file:///tmp/scan.pdf\r\n";
+          if (type === "x-special/gnome-copied-files") return "copy\nfile:///tmp/scan.pdf";
+          return "";
+        },
+      },
+    };
+    expect(dropEventToUriPayload(event)).toContain("file:///tmp/scan.pdf");
+  });
+
+  it("sends uri-list drops through the pywebview ingest bridge", async () => {
+    window.history.replaceState(null, "", "/?desktop=1");
+    const payloads = [];
+    window.pywebview = {
+      api: {
+        ingest_drop: (payload) => {
+          payloads.push(payload);
+          return { ok: ["scan.pdf"], errors: [] };
+        },
+      },
+    };
+    const details = [];
+    window.addEventListener("dc-desktop-drop", (event) => details.push(event.detail), {
+      once: true,
+    });
+    const ok = await ingestDesktopUriDrop({
+      dataTransfer: { getData: (type) => (type === "text/uri-list" ? "file:///tmp/scan.pdf" : "") },
+    });
+    expect(ok).toBe(true);
+    expect(payloads[0]).toContain("file:///tmp/scan.pdf");
+    expect(details[0]).toEqual({ ok: ["scan.pdf"], errors: [] });
+    delete window.pywebview;
+    window.history.replaceState(null, "", "/");
   });
 });
 

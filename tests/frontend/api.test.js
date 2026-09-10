@@ -81,7 +81,25 @@ describe("api()", () => {
     const data = await api("/api/ping", { method: "GET" });
     expect(data.value).toBe(1);
     const [, opts] = fetchMock.mock.calls[0];
-    expect(opts.headers.get("X-Requested-With")).toBe("DeepCatalog");
+    expect(opts.headers["x-requested-with"] || opts.headers["X-Requested-With"]).toBe(
+      "DeepCatalog",
+    );
+  });
+
+  it("keeps the CSRF header on FormData uploads as a plain object", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      statusText: "OK",
+      json: async () => ({ status: "success" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const body = new FormData();
+    body.append("file", new Blob(["x"]), "a.pdf");
+    await api("/api/upload", { method: "POST", body });
+    const headers = fetchMock.mock.calls[0][1].headers;
+    expect(headers).not.toBeInstanceOf(Headers);
+    expect(headers["x-requested-with"] || headers["X-Requested-With"]).toBe("DeepCatalog");
+    expect(fetchMock.mock.calls[0][1].body).toBe(body);
   });
 
   it("throws formatted errors on HTTP failure", async () => {
@@ -108,7 +126,7 @@ describe("api()", () => {
     vi.stubGlobal("fetch", fetchMock);
     await api("/api/health");
     const headers = fetchMock.mock.calls[0][1].headers;
-    expect(headers.get("Authorization")).toBeNull();
+    expect(headers.Authorization || headers.authorization).toBeUndefined();
     expect(fetchMock.mock.calls[0][1].credentials).toBe("same-origin");
   });
 });

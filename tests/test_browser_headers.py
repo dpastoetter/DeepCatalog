@@ -28,9 +28,22 @@ def test_csp_is_strict_and_blocks_third_party():
     assert "frame-ancestors 'none'" in csp
     assert "base-uri 'none'" in csp
     assert "unsafe-inline" not in csp
+    assert "unsafe-eval" not in csp
     assert "fonts.googleapis" not in csp
     assert "worker-src 'self'" in csp
     assert "https:" not in csp
+
+
+def test_desktop_csp_allows_pywebview_eval(client):
+    from app.security_headers import DESKTOP_CONTENT_SECURITY_POLICY
+
+    resp = client.get("/?desktop=1")
+    assert resp.status_code == 200
+    csp = resp.headers.get("Content-Security-Policy")
+    assert csp == DESKTOP_CONTENT_SECURITY_POLICY
+    assert "unsafe-eval" in csp
+    assert "script-src 'self' 'unsafe-eval'" in csp
+    assert "unsafe-inline" not in csp
 
 
 def test_spa_has_no_external_fonts_or_inline_theme_script():

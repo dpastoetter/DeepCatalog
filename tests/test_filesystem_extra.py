@@ -83,3 +83,31 @@ def test_read_document_image_notes_vision(isolated_data):
     result = filesystem.read_document(str(img))
     assert result["status"] == "success"
     assert result.get("suffix") == ".png" or "image" in str(result).lower()
+
+
+def test_copy_local_scan_to_inbox(isolated_data, tmp_path):
+    from tests.media_fixtures import write_minimal_pdf
+
+    inbox = get_source_dir()
+    src = write_minimal_pdf(tmp_path / "scan.pdf")
+    copied = filesystem.copy_local_scan_to_inbox(src, max_bytes=1024 * 1024)
+    assert copied["status"] == "success"
+    dest = inbox / "scan.pdf"
+    assert dest.is_file()
+    assert dest.read_bytes() == src.read_bytes()
+
+    again = filesystem.copy_local_scan_to_inbox(dest, max_bytes=1024 * 1024)
+    assert again["status"] == "success"
+    assert again.get("already_in_inbox") is True
+
+    junk = tmp_path / "notes.txt"
+    junk.write_text("nope")
+    rejected = filesystem.copy_local_scan_to_inbox(junk, max_bytes=1024 * 1024)
+    assert rejected["status"] == "error"
+    assert rejected.get("code") == "unsupported"
+
+    huge = tmp_path / "huge.pdf"
+    huge.write_bytes(src.read_bytes())
+    too_big = filesystem.copy_local_scan_to_inbox(huge, max_bytes=1)
+    assert too_big["status"] == "error"
+    assert too_big.get("code") == "too_large"

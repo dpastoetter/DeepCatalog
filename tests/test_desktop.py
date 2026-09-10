@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import socket
 import subprocess
 import sys
@@ -21,19 +22,25 @@ from deepcatalog.desktop import (
     _try_native_window,
     chromium_app_argv,
     chromium_profile_dir,
+    configure_webview_runtime_env,
     desktop_exec_command,
+    desktop_prefers_dark,
     desktop_ui_url,
+    drop_payload_to_paths,
     find_chromium_app_browser,
     health_url,
+    ingest_dropped_scan_paths,
     install_linux_desktop_entry,
     is_external_http_url,
     is_server_healthy,
     main,
     open_chromium_app_window,
     render_desktop_entry,
+    should_reuse_running_server,
     splash_html,
     splash_html_path,
     wait_for_health,
+    webview_storage_path,
     window_icon_path,
 )
 
@@ -77,6 +84,16 @@ def test_wait_for_health_times_out():
     # Port is not listening after the socket closes — health must time out.
     with pytest.raises(TimeoutError, match="did not become ready"):
         wait_for_health("127.0.0.1", port, timeout=0.4)
+
+
+def test_appimage_does_not_reuse_a_running_server(monkeypatch):
+    monkeypatch.setenv("DEEPCATALOG_APPIMAGE", "1")
+    assert should_reuse_running_server() is False
+    monkeypatch.delenv("DEEPCATALOG_APPIMAGE", raising=False)
+    monkeypatch.delenv("APPIMAGE", raising=False)
+    assert should_reuse_running_server() is True
+    monkeypatch.setenv("APPIMAGE", "/tmp/DeepCatalog.AppImage")
+    assert should_reuse_running_server() is False
 
 
 def test_project_root_honors_env(tmp_path, monkeypatch):
@@ -140,6 +157,12 @@ def test_chromium_app_argv_uses_isolated_profile_and_class(tmp_path):
     assert f"--class={WM_CLASS}" in argv
     assert "--ozone-platform-hint=x11" in argv
     assert profile.is_dir()
+
+
+def test_webview_storage_path_creates_dir(tmp_path):
+    path = webview_storage_path(tmp_path)
+    assert path == tmp_path / "webview"
+    assert path.is_dir()
 
 
 def test_find_chromium_app_browser_prefers_chromium(monkeypatch):
@@ -263,7 +286,7 @@ def test_try_native_window_logs_webkit_failure(monkeypatch, caplog):
     assert "Native WebKitGTK window failed" in caplog.text
 
 
-def test_try_native_window_starts_gtk_backend(monkeypatch):
+def test_try_native_window_starts_gtk_backend(monkeypatch, tmp_path):
     webview = MagicMock()
     webview.settings = {}
     window = MagicMock()
@@ -271,14 +294,50 @@ def test_try_native_window_starts_gtk_backend(monkeypatch):
     monkeypatch.setitem(sys.modules, "webview", webview)
     monkeypatch.setattr("deepcatalog.desktop._apply_gtk_wm_class", lambda: None)
     monkeypatch.setattr("deepcatalog.desktop.sys.platform", "linux")
-    assert _try_native_window("http://127.0.0.1:8080/?desktop=1", 800, 600) is True
+    assert (
+        _try_native_window("http://127.0.0.1:8080/?desktop=1", 800, 600, data_dir=tmp_path) is True
+    )
     kwargs = webview.start.call_args.kwargs
     assert kwargs["gui"] == "gtk"
     assert kwargs["debug"] is False
-    assert kwargs["private_mode"] is True
+    assert kwargs["private_mode"] is False
+    assert kwargs["storage_path"] == str(tmp_path / "webview")
     created = webview.create_window.call_args.kwargs
-    assert "DeepCatalog" in created.get("html", "")
+    assert created["url"] == "http://127.0.0.1:8080/?desktop=1"
+    assert created["text_select"] is False
+    assert not created.get("html")
     assert created["js_api"].__class__.__name__ == "DesktopJsApi"
+
+
+def test_desktop_prefers_dark_reads_env(monkeypatch):
+    monkeypatch.setenv("DEEPCATALOG_GTK_DARK", "1")
+    monkeypatch.delenv("GTK_THEME", raising=False)
+    assert desktop_prefers_dark() is True
+    monkeypatch.setenv("DEEPCATALOG_GTK_DARK", "0")
+    assert desktop_prefers_dark() is False
+    monkeypatch.delenv("DEEPCATALOG_GTK_DARK", raising=False)
+    monkeypatch.setenv("GTK_THEME", "Adwaita:dark")
+    assert desktop_prefers_dark() is True
+
+
+def test_configure_webview_runtime_env_sets_webkit_defaults(monkeypatch):
+    monkeypatch.setattr("deepcatalog.desktop.sys.platform", "linux")
+    monkeypatch.delenv("WEBKIT_FORCE_SANDBOX", raising=False)
+    monkeypatch.delenv("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", raising=False)
+    monkeypatch.delenv("WEBKIT_DISABLE_COMPOSITING_MODE", raising=False)
+    monkeypatch.delenv("WEBKIT_DISABLE_DMABUF_RENDERER", raising=False)
+    configure_webview_runtime_env()
+    assert os.environ["WEBKIT_FORCE_SANDBOX"] == "0"
+    assert os.environ["WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS"] == "1"
+    assert os.environ["WEBKIT_DISABLE_COMPOSITING_MODE"] == "1"
+    assert os.environ["WEBKIT_DISABLE_DMABUF_RENDERER"] == "1"
+
+
+def test_configure_webview_runtime_env_does_not_override(monkeypatch):
+    monkeypatch.setattr("deepcatalog.desktop.sys.platform", "linux")
+    monkeypatch.setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "0")
+    configure_webview_runtime_env()
+    assert os.environ["WEBKIT_DISABLE_COMPOSITING_MODE"] == "0"
 
 
 def test_launch_falls_back_to_chromium_when_webview_fails(tmp_path, monkeypatch):
@@ -319,6 +378,16 @@ def test_desktop_js_api_opens_external_only(monkeypatch):
     assert api.open_url("http://127.0.0.1:8080/") is False
     assert api.open_url("about:blank") is False
     assert opened == ["https://github.com/dpastoetter/DeepCatalog"]
+
+
+def test_desktop_js_api_ingest_drop_copies_local_pdf(isolated_data, tmp_path, monkeypatch):
+    from tests.media_fixtures import write_minimal_pdf
+
+    pdf = write_minimal_pdf(tmp_path / "nautilus.pdf")
+    api = DesktopJsApi()
+    result = api.ingest_drop(f"copy\n{pdf.as_uri()}\n")
+    assert result["ok"] == ["nautilus.pdf"]
+    assert result["errors"] == []
 
 
 def test_splash_html_reads_packaging_file():
@@ -374,3 +443,42 @@ def test_launch_falls_back_to_chromium_then_browser(tmp_path, monkeypatch):
         is False
     )
     assert opened == ["http://127.0.0.1:8080/?desktop=1"]
+
+
+def test_drop_payload_to_paths_parses_uri_list(tmp_path):
+    from tests.media_fixtures import write_minimal_pdf
+
+    spaced = write_minimal_pdf(tmp_path / "my scan.pdf")
+    nested = write_minimal_pdf(tmp_path / "ok.pdf")
+    missing = tmp_path / "gone.pdf"
+    folder = tmp_path / "dir"
+    folder.mkdir()
+    payload = "\r\n".join(
+        [
+            "# comment",
+            spaced.as_uri(),
+            f"file://localhost{nested.as_posix()}",
+            str(nested),
+            str(missing),
+            str(folder),
+            "file://example.com/remote.pdf",
+            "https://example.com/scan.pdf",
+            "",
+        ]
+    )
+    paths = drop_payload_to_paths(payload)
+    assert paths == [spaced.resolve(), nested.resolve()]
+    gnome = drop_payload_to_paths(f"copy\n{spaced.as_uri()}\n")
+    assert gnome == [spaced.resolve()]
+
+
+def test_ingest_dropped_scan_paths_copies_and_reports(isolated_data, tmp_path):
+    from tests.media_fixtures import write_minimal_pdf
+
+    pdf = write_minimal_pdf(tmp_path / "drop.pdf")
+    junk = tmp_path / "notes.txt"
+    junk.write_text("nope")
+    result = ingest_dropped_scan_paths([pdf, junk])
+    assert result["ok"] == ["drop.pdf"]
+    assert len(result["errors"]) == 1
+    assert "notes.txt" in result["errors"][0]

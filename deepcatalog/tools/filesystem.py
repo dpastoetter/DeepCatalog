@@ -461,6 +461,74 @@ def save_upload_to_inbox(filename: str, content: bytes) -> dict[str, Any]:
     }
 
 
+def copy_local_scan_to_inbox(source: Path, *, max_bytes: int) -> dict[str, Any]:
+    """Copy a local file (file-manager drop) into the inbox after validation."""
+    ensure_data_dirs()
+    try:
+        src = Path(source).expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        return {"status": "error", "error": f"invalid path: {exc}", "code": "invalid_path"}
+    if not src.is_file():
+        return {"status": "error", "error": "not a file", "code": "not_a_file"}
+    suffix = src.suffix.lower()
+    if suffix not in SUPPORTED_SUFFIXES:
+        return {
+            "status": "error",
+            "error": f"unsupported file type: {suffix or 'none'}",
+            "code": "unsupported",
+            "supported": sorted(SUPPORTED_SUFFIXES),
+        }
+    try:
+        size = src.stat().st_size
+    except OSError as exc:
+        return {"status": "error", "error": f"could not read file: {exc}"}
+    if size == 0:
+        return {"status": "error", "error": "empty file", "code": "empty"}
+    if max_bytes <= 0 or size > max_bytes:
+        return {
+            "status": "error",
+            "error": f"file too large (max {max(0, max_bytes) // (1024 * 1024)} MB)",
+            "code": "too_large",
+        }
+    inbox = get_source_dir()
+    inbox.mkdir(parents=True, exist_ok=True)
+    if path_is_within(src, inbox):
+        return {
+            "status": "success",
+            "path": str(src),
+            "filename": src.name,
+            "source_dir": str(inbox),
+            "bytes": size,
+            "already_in_inbox": True,
+        }
+    dest = _unique_inbox_destination(inbox, src.name)
+    if not dest.resolve().is_relative_to(inbox.resolve()):
+        return {"status": "error", "error": "upload path escapes inbox"}
+    partial = inbox / f".{dest.name}.{uuid.uuid4().hex}.part"
+    try:
+        shutil.copyfile(str(src), str(partial))
+        if not partial.resolve().is_relative_to(inbox.resolve()):
+            partial.unlink(missing_ok=True)
+            return {"status": "error", "error": "upload path escapes inbox"}
+        try:
+            media = validate_scan_file(partial, suffix=dest.suffix)
+        except MediaValidationError as exc:
+            partial.unlink(missing_ok=True)
+            return {"status": "error", "error": str(exc), "code": exc.code}
+        os.replace(str(partial), str(dest))
+    except OSError as exc:
+        partial.unlink(missing_ok=True)
+        return {"status": "error", "error": f"could not save file: {exc}"}
+    return {
+        "status": "success",
+        "path": str(dest.resolve()),
+        "filename": dest.name,
+        "source_dir": str(inbox),
+        "bytes": size,
+        "media": media,
+    }
+
+
 async def stream_upload_to_inbox(
     filename: str,
     upload: Any,

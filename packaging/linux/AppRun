@@ -24,14 +24,66 @@ if [ -d "$HERE/usr/lib/girepository-1.0" ]; then
   export GI_TYPELIB_PATH="$HERE/usr/lib/girepository-1.0${GI_TYPELIB_PATH:+:$GI_TYPELIB_PATH}"
 fi
 if [ -d "$HERE/usr/lib/webkit2gtk-4.1" ]; then
-  export WEBKIT_EXEC_PATH="$HERE/usr/lib/webkit2gtk-4.1"
+  wk_helpers="$HERE/usr/lib/webkit2gtk-4.1"
+  wk_link="/tmp/.dc/x86_64-linux-gnu/webkit2gtk-4.1"
 elif [ -d "$HERE/usr/lib/webkit2gtk-4.0" ]; then
-  export WEBKIT_EXEC_PATH="$HERE/usr/lib/webkit2gtk-4.0"
+  wk_helpers="$HERE/usr/lib/webkit2gtk-4.0"
+  wk_link="/tmp/.dc/x86_64-linux-gnu/webkit2gtk-4.0"
+else
+  wk_helpers=""
+  wk_link=""
+fi
+# Release WebKitGTK ignores WEBKIT_EXEC_PATH; the .so is patched to $wk_link.
+if [ -n "$wk_link" ]; then
+  mkdir -p "$(dirname "$wk_link")"
+  ln -sfn "$wk_helpers" "$wk_link"
+  export WEBKIT_EXEC_PATH="$wk_helpers"
+  if [ -d "$wk_helpers/injected-bundle" ]; then
+    export WEBKIT_INJECTED_BUNDLE_PATH="$wk_helpers/injected-bundle"
+  fi
 fi
 # bwrap sandbox cannot see the AppImage mount as a normal rootfs.
 export WEBKIT_FORCE_SANDBOX="${WEBKIT_FORCE_SANDBOX:-0}"
+export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS="${WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS:-1}"
+# Bundled WebKit on Fedora/NVIDIA/Wayland often paints a black view otherwise.
+export WEBKIT_DISABLE_COMPOSITING_MODE="${WEBKIT_DISABLE_COMPOSITING_MODE:-1}"
+export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"
 
-export XDG_DATA_DIRS="$HERE/usr/share:${XDG_DATA_DIRS:-/usr/share}"
+# Capture the session color-scheme before isolating GSettings (memory backend
+# would hide dconf, and a light Adwaita CSD on a dark desktop looks wrong).
+if [ -z "${DEEPCATALOG_GTK_DARK:-}" ]; then
+  scheme=""
+  gtk_th=""
+  if command -v gsettings >/dev/null 2>&1; then
+    scheme=$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null || true)
+    gtk_th=$(gsettings get org.gnome.desktop.interface gtk-theme 2>/dev/null || true)
+  fi
+  case "$scheme" in
+    *prefer-dark*) export DEEPCATALOG_GTK_DARK=1 ;;
+    *prefer-light*) export DEEPCATALOG_GTK_DARK=0 ;;
+    *)
+      case "$gtk_th" in
+        *[Dd]ark*) export DEEPCATALOG_GTK_DARK=1 ;;
+        *) export DEEPCATALOG_GTK_DARK=0 ;;
+      esac
+      ;;
+  esac
+fi
+if [ "${DEEPCATALOG_GTK_DARK:-0}" = "1" ]; then
+  export GTK_THEME="${GTK_THEME:-Adwaita:dark}"
+else
+  export GTK_THEME="${GTK_THEME:-Adwaita}"
+fi
+
+# Bundled GTK must use the Ubuntu Adwaita copied at pack time — host GTK CSS
+# (Fedora 42+) is newer than the builder's GTK 3.24 and leaves CSD buttons blank.
+export XDG_DATA_DIRS="$HERE/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+export XDG_CONFIG_DIRS="$HERE/etc:${XDG_CONFIG_DIRS:-/etc/xdg}"
+export GTK_DATA_PREFIX="${GTK_DATA_PREFIX:-$HERE/usr}"
+# Host GNOME file portal (so the picker sees PDF MIME types from the OS).
+export GTK_USE_PORTAL="${GTK_USE_PORTAL:-1}"
+# Ignore session dconf (Fedora icon themes the bundled pixbuf cannot render).
+export GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-memory}"
 if [ -d "$HERE/usr/share/glib-2.0/schemas" ]; then
   export GSETTINGS_SCHEMA_DIR="$HERE/usr/share/glib-2.0/schemas"
 fi
@@ -44,11 +96,17 @@ if [ -d "$PIXBUF_LOADERS" ]; then
   export GDK_PIXBUF_MODULEDIR="$PIXBUF_LOADERS"
   cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/deepcatalog"
   mkdir -p "$cache_dir"
-  export GDK_PIXBUF_MODULE_FILE="$cache_dir/gdk-pixbuf-loaders.cache"
-  if command -v gdk-pixbuf-query-loaders >/dev/null 2>&1; then
-    gdk-pixbuf-query-loaders > "$GDK_PIXBUF_MODULE_FILE" 2>/dev/null || true
-  elif [ -x "$HERE/usr/bin/gdk-pixbuf-query-loaders" ]; then
-    "$HERE/usr/bin/gdk-pixbuf-query-loaders" > "$GDK_PIXBUF_MODULE_FILE" 2>/dev/null || true
+  # Host gdk-pixbuf-query-loaders writes OS .so paths that cannot load under
+  # the bundled gdk-pixbuf — CSD icons then render as empty boxes.
+  query="$HERE/usr/bin/gdk-pixbuf-query-loaders"
+  if [ -x "$query" ]; then
+    shopt -s nullglob
+    loaders=( "$PIXBUF_LOADERS"/*.so )
+    shopt -u nullglob
+    export GDK_PIXBUF_MODULE_FILE="$cache_dir/gdk-pixbuf-loaders.cache"
+    if [ "${#loaders[@]}" -eq 0 ] || ! "$query" "${loaders[@]}" > "$GDK_PIXBUF_MODULE_FILE" 2>/dev/null; then
+      unset GDK_PIXBUF_MODULE_FILE
+    fi
   fi
 fi
 

@@ -3244,6 +3244,21 @@ select:focus-visible {
 html.dc-desktop,
 html.dc-desktop body {
   overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+html.dc-desktop input,
+html.dc-desktop textarea,
+html.dc-desktop select,
+html.dc-desktop [contenteditable="true"],
+html.dc-desktop .ask-answer,
+html.dc-desktop .review-fields,
+html.dc-desktop .out,
+html.dc-desktop pre,
+html.dc-desktop code {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 html.dc-desktop .sidebar {

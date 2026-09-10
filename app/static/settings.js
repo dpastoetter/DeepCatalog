@@ -527,7 +527,7 @@ export function settingsShellHtml() {
             <div>
               <p class="section-kicker">Appearance</p>
               <h2>Look &amp; feel</h2>
-              <p class="auth-line">Pick a preset. Applies instantly and is remembered in this browser.</p>
+              <p class="auth-line">Pick a preset. Applies instantly and is remembered on this computer.</p>
             </div>
           </div>
           <div class="theme-grid" id="theme-grid">
@@ -586,7 +586,7 @@ export function settingsShellHtml() {
               <input type="checkbox" id="ask-examples-toggle" checked />
               <span>Show example questions on the Ask empty state</span>
             </label>
-            <p class="fine">Suggested prompts under Ask when the thread is empty. Stored in this browser only.</p>
+            <p class="fine">Suggested prompts under Ask when the thread is empty. Remembered on this computer.</p>
           </div>
 
           <div class="mock-block">

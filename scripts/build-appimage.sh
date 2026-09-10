@@ -6,6 +6,9 @@
 #   ./scripts/build-appimage.sh v0.2.9
 #   ./scripts/build-appimage.sh v0.2.9 HEAD
 #
+#   DEEPCATALOG_APPIMAGE_WORKDIR=1 ./scripts/build-appimage.sh
+#     Pack HEAD plus uncommitted tracked files (local test images).
+#
 # Requires: linux x86_64, git, curl, tar, python3, pdftoppm, pdfinfo, patchelf, ldd,
 # gcc, pkg-config, meson, ninja, WebKitGTK 4.1 or 4.0, gobject-introspection, cairo headers
 # (see CI apt list in .github/workflows/release.yml / appimage.yml).
@@ -225,6 +228,15 @@ vendor_webkit_stack() {
   VENDOR_MODE=webkit
   vendor_deps "$webkit_so" "$webkit_dest"
 
+  bundled_webkit=""
+  for candidate in "$webkit_dest"/libwebkit2gtk-4.1.so* "$webkit_dest"/libwebkit2gtk-4.0.so*; do
+    [ -f "$candidate" ] || continue
+    bundled_webkit="$candidate"
+    break
+  done
+  [ -n "$bundled_webkit" ] || die "vendored libwebkit2gtk missing from ${webkit_dest}"
+  python3 "$ROOT/scripts/relocate-webkit.py" "$bundled_webkit"
+
   libdir="$(dirname "$webkit_so")"
   helper_src=""
   helper_name=""
@@ -278,6 +290,64 @@ vendor_webkit_stack() {
     done
   fi
 
+  query_loaders=""
+  for candidate in \
+    "$(command -v gdk-pixbuf-query-loaders 2>/dev/null || true)" \
+    "$(command -v gdk-pixbuf-query-loaders-64 2>/dev/null || true)" \
+    /usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/gdk-pixbuf-query-loaders \
+    /usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/*/gdk-pixbuf-query-loaders \
+    /usr/lib64/gdk-pixbuf-2.0/gdk-pixbuf-query-loaders \
+    /usr/bin/gdk-pixbuf-query-loaders
+  do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+      query_loaders="$candidate"
+      break
+    fi
+  done
+  if [ -z "$query_loaders" ]; then
+    query_loaders="$(find /usr/lib /usr/lib64 /usr/bin -name 'gdk-pixbuf-query-loaders' -type f 2>/dev/null | head -1 || true)"
+  fi
+  if [ -n "$query_loaders" ] && [ -x "$query_loaders" ]; then
+    echo "Vendoring gdk-pixbuf-query-loaders from ${query_loaders}"
+    install -m 0755 "$query_loaders" "$APPDIR/usr/bin/gdk-pixbuf-query-loaders"
+    vendor_deps "$APPDIR/usr/bin/gdk-pixbuf-query-loaders" "$webkit_dest"
+    if command -v patchelf >/dev/null; then
+      patchelf --set-rpath "\$ORIGIN/../lib/deepcatalog-webkit" \
+        "$APPDIR/usr/bin/gdk-pixbuf-query-loaders" 2>/dev/null || true
+    fi
+  fi
+
+  mkdir -p "$APPDIR/usr/share/themes" "$APPDIR/usr/share/icons" "$APPDIR/etc/gtk-3.0"
+  for theme in Adwaita Adwaita-dark HighContrast Default; do
+    if [ -d "/usr/share/themes/$theme" ]; then
+      cp -a "/usr/share/themes/$theme" "$APPDIR/usr/share/themes/"
+    fi
+  done
+  if [ -d /usr/share/icons/Adwaita ]; then
+    cp -a /usr/share/icons/Adwaita "$APPDIR/usr/share/icons/"
+  fi
+  if [ -f /usr/share/icons/hicolor/index.theme ]; then
+    mkdir -p "$APPDIR/usr/share/icons/hicolor"
+    cp -a /usr/share/icons/hicolor/index.theme "$APPDIR/usr/share/icons/hicolor/"
+  fi
+  if [ -d /usr/share/mime ]; then
+    mkdir -p "$APPDIR/usr/share/mime"
+    cp -a /usr/share/mime/. "$APPDIR/usr/share/mime/"
+  fi
+  cat > "$APPDIR/etc/gtk-3.0/settings.ini" <<'EOF'
+[Settings]
+gtk-theme-name=Adwaita
+gtk-icon-theme-name=Adwaita
+gtk-cursor-theme-name=Adwaita
+gtk-font-name=Sans 11
+gtk-decoration-layout=:minimize,maximize,close
+gtk-application-prefer-dark-theme=true
+EOF
+  [ -d "$APPDIR/usr/share/icons/Adwaita" ] \
+    || die "Adwaita icons missing (install adwaita-icon-theme)"
+  [ -x "$APPDIR/usr/bin/gdk-pixbuf-query-loaders" ] \
+    || die "gdk-pixbuf-query-loaders missing (install libgdk-pixbuf2.0-bin / libgdk-pixbuf2.0-dev)"
+
   if [ -d /usr/lib/x86_64-linux-gnu/gio/modules ]; then
     mkdir -p "$APPDIR/usr/lib/gio/modules"
     cp -a /usr/lib/x86_64-linux-gnu/gio/modules/. "$APPDIR/usr/lib/gio/modules/" 2>/dev/null || true
@@ -316,6 +386,7 @@ need_cmd ldd
 need_cmd patchelf
 need_cmd pdftoppm
 need_cmd pdfinfo
+need_cmd file
 
 if ! git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   die "git checkout required to build a clean AppImage"
@@ -328,6 +399,8 @@ VERSION="${TAG#v}"
 
 if [ -n "$REF_ARG" ]; then
   REF="$REF_ARG"
+elif [ "${DEEPCATALOG_APPIMAGE_WORKDIR:-0}" = "1" ]; then
+  REF="HEAD"
 elif git -C "$ROOT" rev-parse -q --verify "refs/tags/${TAG}^{commit}" >/dev/null; then
   REF="refs/tags/${TAG}"
 else
@@ -337,7 +410,15 @@ fi
 COMMIT="$(git -C "$ROOT" rev-parse "${REF}^{commit}")"
 COMMIT_SHORT="$(git -C "$ROOT" rev-parse --short=12 "$COMMIT")"
 
-rm -rf "$APPDIR" "$DIST/squashfs-root"
+for leftover in "$APPDIR" "$DIST/squashfs-root"; do
+  [ -e "$leftover" ] || continue
+  chmod -R u+w "$leftover" 2>/dev/null || true
+  rm -rf "$leftover" || true
+  if [ -e "$leftover" ]; then
+    find "$leftover" -mindepth 1 -delete 2>/dev/null || true
+    rm -rf "$leftover" || die "could not remove ${leftover}"
+  fi
+done
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib/deepcatalog-native" "$APPDIR/usr/lib/deepcatalog-webkit" "$APPDIR/opt/deepcatalog" "$CACHE"
 
 echo "Packing commit ${COMMIT_SHORT} as DeepCatalog ${VERSION}"
@@ -345,6 +426,14 @@ echo "Packing commit ${COMMIT_SHORT} as DeepCatalog ${VERSION}"
 git -C "$ROOT" archive --format=tar "$COMMIT" | tar -x -C "$APPDIR/opt/deepcatalog"
 
 SRC="$APPDIR/opt/deepcatalog"
+LOCAL_SUFFIX=""
+if [ "${DEEPCATALOG_APPIMAGE_WORKDIR:-0}" = "1" ]; then
+  echo "Overlaying git working tree (uncommitted tracked files)"
+  git -C "$ROOT" ls-files -z \
+    | tar -C "$ROOT" --null -T - -cf - \
+    | tar -x -C "$SRC"
+  LOCAL_SUFFIX="-local"
+fi
 rm -rf \
   "$SRC/tests" \
   "$SRC/.github" \
@@ -422,7 +511,7 @@ vendor_webkit_stack "$APPDIR/usr/lib/deepcatalog-webkit"
 download_verified "$APPIMAGETOOL_URL" "$CACHE/appimagetool-x86_64.AppImage" "$APPIMAGETOOL_SHA256"
 chmod +x "$CACHE/appimagetool-x86_64.AppImage"
 
-APPIMAGE_NAME="DeepCatalog-${VERSION}-x86_64.AppImage"
+APPIMAGE_NAME="DeepCatalog-${VERSION}${LOCAL_SUFFIX}-x86_64.AppImage"
 rm -f "$DIST/$APPIMAGE_NAME"
 
 # appimagetool is itself an AppImage; extract-and-run so CI (no FUSE) can pack.
@@ -443,6 +532,11 @@ DEEPCATALOG_PROJECT_ROOT="$SMOKE/opt/deepcatalog" \
   PYTHONPATH="$SMOKE/opt/deepcatalog" \
   "$SMOKE/usr/bin/python3" -c "from app.main import app; print(app.version)"
 "$SMOKE/usr/bin/pdftoppm" -v >/dev/null
+[ -d "$SMOKE/usr/share/icons/Adwaita" ] || die "extracted AppImage is missing Adwaita icons"
+[ -x "$SMOKE/usr/bin/gdk-pixbuf-query-loaders" ] || die "extracted AppImage is missing gdk-pixbuf-query-loaders"
+[ -f "$SMOKE/etc/gtk-3.0/settings.ini" ] || die "extracted AppImage is missing gtk-3.0/settings.ini"
+ls "$SMOKE"/usr/lib/gdk-pixbuf-2.0/loaders/*svg* >/dev/null 2>&1 \
+  || die "extracted AppImage is missing the gdk-pixbuf SVG loader (install librsvg2-common)"
 GI_TYPELIB_PATH="$SMOKE/usr/lib/girepository-1.0${GI_TYPELIB_PATH:+:$GI_TYPELIB_PATH}" \
   LD_LIBRARY_PATH="$SMOKE/usr/lib/deepcatalog-webkit${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
   "$SMOKE/usr/bin/python3" -c "
@@ -462,6 +556,20 @@ if not ok:
 from gi.repository import Gtk, WebKit2
 print('gi-ok', Gtk, WebKit2)
 "
+python3 - "$SMOKE" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+libs = list((root / "usr/lib/deepcatalog-webkit").glob("libwebkit2gtk-4.*.so*"))
+if not libs:
+    raise SystemExit("extracted AppImage is missing libwebkit2gtk")
+blob = libs[0].read_bytes()
+if b"/tmp/.dc/x86_64-linux-gnu/webkit2gtk-4." not in blob:
+    raise SystemExit("libwebkit2gtk was not relocated to /tmp/.dc libexec")
+if b"/usr/lib/x86_64-linux-gnu/webkit2gtk-4." in blob:
+    raise SystemExit("libwebkit2gtk still contains the Ubuntu libexec path")
+print("webkit-libexec-ok")
+PY
 "$SMOKE/AppRun" --help >/dev/null
 rm -rf "$DIST/squashfs-root"
 

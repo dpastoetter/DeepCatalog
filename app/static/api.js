@@ -75,7 +75,9 @@ export async function api(path, options = {}) {
   } else if (typeof body === "string" && body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const res = await fetch(path, { ...options, headers, body, credentials: "same-origin" });
+  // WebKitGTK drops a Headers instance on multipart FormData; a plain object is kept.
+  const headerInit = Object.fromEntries(headers.entries());
+  const res = await fetch(path, { ...options, headers: headerInit, body, credentials: "same-origin" });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(formatApiError(data, res.statusText || "Request failed"));

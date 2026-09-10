@@ -6,9 +6,23 @@ Drop scanned PDFs and photos into an inbox, and DeepCatalog recovers the text wi
 
 The desktop and web workspace is **DeepCatalog Studio** — your local workspace for archive discovery and automation.
 
-Built with [Google ADK](https://adk.dev/) (Python) + FastAPI. Works with **OpenAI (ChatGPT OAuth or API key)**, **Gemini**, or **Ollama (fully local)**. Everything runs and stays on your machine.
+Built with [Google ADK](https://adk.dev/) (Python) + FastAPI. Works with **OpenAI (ChatGPT OAuth or API key)**, **Gemini**, or **Ollama**.
+
+Your files, database, and search index are **always stored on this machine**. That is not the same as fully local processing: if you use ChatGPT or Gemini, document pages and text are also sent to that provider for OCR, metadata extraction, and Ask. **Only local Ollama is truly fully local.** See [Privacy](#privacy-local-storage-vs-cloud-ai).
 
 ![Inbox workbench with a live ingest pipeline](docs/screenshots/inbox.png)
+
+## Privacy: local storage vs cloud AI
+
+DeepCatalog never uploads your archive to a DeepCatalog cloud. Inbox folders, filed PDFs, `data/deepcatalog.db` (SQLite), and `data/chroma/` (vectors) stay on disk (or under `~/.local/share/deepcatalog` for the AppImage).
+
+| Mode | Where files live | Where document content goes for AI |
+| --- | --- | --- |
+| **Local Ollama** | This machine | This machine only. OCR, extraction, embeddings, and Ask run on local models. This is the only fully local setup. |
+| **ChatGPT / Gemini** | This machine | **Also to OpenAI or Google.** Page images and text leave the machine so the cloud model can transcribe, extract metadata, propose names, and answer Ask. You must accept the cloud processing disclaimer in **Settings → AI provider** first. |
+| **Remote Ollama** | This machine | **Also to the Ollama host you configured.** Same document payloads as local Ollama, but on another computer. Requires the remote-Ollama privacy disclaimer. |
+
+Switching to a cloud provider does not move your filed archive off-disk. It only sends the pages/text needed for that processing step, then writes results back locally.
 
 ## Features
 
@@ -19,7 +33,7 @@ Built with [Google ADK](https://adk.dev/) (Python) + FastAPI. Works with **OpenA
 - **Smart metadata extraction**: category-aware fields — `subject`, `parties`, and `reference_ids` for all document types; amount/currency only for invoices, receipts, bank/tax/utility/insurance documents. Missing `doc_type` defaults to `other`; common aliases (`document_type`, `category`) are accepted
 - **Duplicate detection**: SHA-256 file checksums, normalized content hashes, and text-similarity matching flag re-scans and near-duplicates before they are filed
 - **Ask your archive**: grounded RAG + FTS5 keyword search with source citations, a chat-style composer, and optional example questions (no “recent docs” padding when retrieval misses)
-- **Local storage**: configurable inbox and per-category archive folders, `data/deepcatalog.db` (SQLite + FTS5), `data/chroma/` (vectors)
+- **Local storage**: inbox and per-category archive folders, `data/deepcatalog.db` (SQLite + FTS5), `data/chroma/` (vectors) — always on this machine; cloud AI does not replace this store
 - **Inbox polling**: automatic processing of new scans on a configurable interval
 - **Local Ollama tooling**: start the daemon, pull models, show CPU/GPU usage for loaded models, unload or restart Ollama from Settings
 - **Boot autostart (Linux)**: optional systemd user service so the web UI comes up after login or reboot
@@ -59,7 +73,7 @@ The recommended Linux desktop install is the **AppImage** (no Python/venv setup)
 
 ### Linux AppImage
 
-Download the `x86_64` AppImage from [GitHub Releases](https://github.com/dpastoetter/DeepCatalog/releases/latest) (glibc 2.35+ — Ubuntu 22.04, Fedora 36, Debian 12, and newer). Poppler and a **private GTK + WebKitGTK window** are bundled. On first launch the AppImage installs a `.desktop` entry (`StartupWMClass=DeepCatalog`) so the window groups under its own icon. The Studio UI opens in that native window (title **DeepCatalog Studio**), not in Brave or Chrome. If WebKit cannot start, it falls back to a Chromium `--app` window (Chromium/Chrome before Brave), then to your default browser.
+Download the `x86_64` AppImage from [GitHub Releases](https://github.com/dpastoetter/DeepCatalog/releases/latest) (glibc 2.35+ — Ubuntu 22.04, Fedora 36, Debian 12, and newer). Poppler and a **private GTK + WebKitGTK window** (plus the Adwaita theme) are bundled. On first launch the AppImage installs a `.desktop` entry (`StartupWMClass=DeepCatalog`) so the window groups under its own icon. The Studio UI opens in that native window (title **DeepCatalog Studio**), not in Brave or Chrome. If WebKit cannot start, it falls back to a Chromium `--app` window (Chromium/Chrome before Brave), then to your default browser.
 
 ```bash
 # Optional (source installs): native GTK window via host WebKitGTK
@@ -206,7 +220,11 @@ If you already have a clone but no `.venv`, run the `venv` / `pip install` steps
 
 ## AI providers
 
-Cloud providers are locked until you approve the **cloud processing disclaimer** in **Settings → AI provider** (document page images and text leave this machine). Local Ollama does not require that acknowledgement.
+Pick a provider in **Settings → AI provider**. Storage stays local in every mode; see [Privacy](#privacy-local-storage-vs-cloud-ai).
+
+**ChatGPT and Gemini are cloud AI.** Page images and document text are sent to that provider for OCR, extraction, naming, and Ask. Those providers stay locked until you approve the **cloud processing disclaimer**.
+
+**Local Ollama is the only fully local option** — no cloud account, no document data to an AI company. Remote Ollama still sends document content to the other host (separate disclaimer).
 
 ### OpenAI / ChatGPT
 
@@ -229,7 +247,9 @@ ChatGPT OAuth only supports Codex models (e.g. `gpt-5.6-luna` / `terra` / `sol`)
 
 **Find details (metadata extract)** uses the Codex Responses streaming API. The pipeline asks for JSON only and parses fenced or partially wrapped replies; empty model output is reported distinctly from invalid JSON. Platform API-key mode can additionally request JSON object mode on chat completions.
 
-### Gemini (alternative)
+### Gemini (cloud)
+
+Google’s API is a cloud provider: document pages and text are sent to Google for OCR, extraction, and Ask, same as ChatGPT. Storage of the archive remains local.
 
 ```bash
 DEEPCATALOG_LLM_PROVIDER=gemini
@@ -240,7 +260,9 @@ DEEPCATALOG_EMBEDDING_MODEL=text-embedding-004
 
 ### Ollama (fully local)
 
-Run everything on your own hardware — no cloud account, no API key. The agent, AI vision OCR, and RAG embeddings all go through your local Ollama server.
+This is the only mode where **nothing leaves the machine** for AI. No cloud account, no API key. OCR, metadata extraction, embeddings, and Ask all go through Ollama on this computer. Local Ollama does not require the cloud processing disclaimer.
+
+Remote Ollama (a server on another host) is **not** fully local — document data is sent to that host.
 
 1. Install [Ollama](https://ollama.com/download) and make sure it is running (`ollama serve`), or use **Start Ollama** in Settings when the CLI is installed but the daemon is down.
 2. Open the app → **Settings → AI provider → Local Ollama**.

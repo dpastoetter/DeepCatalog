@@ -1,15 +1,19 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  UPLOAD_ACCEPT,
   UPLOAD_CONCURRENCY,
   appendFilesToStaging,
+  fileInputAcceptAttribute,
   formatBytes,
   formatUploadSummary,
+  inboxShellHtml,
   isSupportedUploadName,
   removeStagedFile,
   runPool,
   settleStagingAfterUpload,
   totalStagedBytes,
+  uploadRequestInit,
 } from "../../app/static/inbox.js";
 
 function fakeFile(name, size = 1000, lastModified = 1) {
@@ -22,6 +26,33 @@ describe("upload support and formatting", () => {
     expect(isSupportedUploadName("photo.jpeg")).toBe(true);
     expect(isSupportedUploadName("notes.docx")).toBe(false);
     expect(isSupportedUploadName("noext")).toBe(false);
+  });
+
+  it("sends the file as a raw body so WebKitGTK keeps the CSRF header", () => {
+    const file = fakeFile("handwritting.pdf");
+    const init = uploadRequestInit(file);
+    expect(init.body).toBe(file);
+    expect(init.body).not.toBeInstanceOf(FormData);
+    expect(init.headers["X-File-Name"]).toBe("handwritting.pdf");
+    expect(init.headers["Content-Type"]).toBe("application/pdf");
+  });
+
+  it("does not use image/* so the GTK/GNOME picker can list PDFs", () => {
+    expect(UPLOAD_ACCEPT).toContain("application/pdf");
+    expect(UPLOAD_ACCEPT).toContain(".pdf");
+    expect(UPLOAD_ACCEPT).not.toContain("image/*");
+    expect(fileInputAcceptAttribute()).toBe(UPLOAD_ACCEPT);
+    expect(inboxShellHtml()).toContain(`accept="${UPLOAD_ACCEPT}"`);
+  });
+
+  it("omits accept in the desktop shell so the file chooser is unfiltered", () => {
+    document.documentElement.classList.add("dc-desktop");
+    try {
+      expect(fileInputAcceptAttribute()).toBe("");
+      expect(inboxShellHtml()).not.toMatch(/id="file"[^>]*accept=/);
+    } finally {
+      document.documentElement.classList.remove("dc-desktop");
+    }
   });
 
   it("formats byte sizes", () => {

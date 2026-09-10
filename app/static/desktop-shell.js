@@ -118,13 +118,64 @@ function onDesktopExternalLinkClick(event) {
   openExternalHttpUrl(href);
 }
 
+function onDesktopDragOver(event) {
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+}
+
+export function dropEventToUriPayload(event) {
+  const dt = event?.dataTransfer;
+  if (!dt || typeof dt.getData !== "function") return "";
+  const chunks = [];
+  for (const type of [
+    "text/uri-list",
+    "text/plain",
+    "text",
+    "x-special/gnome-copied-files",
+  ]) {
+    try {
+      const value = dt.getData(type);
+      if (value) chunks.push(value);
+    } catch {
+      // WebKit throws for types it has not loaded yet.
+    }
+  }
+  return chunks.join("\n");
+}
+
+export async function ingestDesktopUriDrop(event) {
+  const payload = dropEventToUriPayload(event);
+  if (!payload.trim()) return false;
+  if (!/file:|(?:^|[\r\n])\//.test(payload)) return false;
+  const api = window.pywebview?.api;
+  if (!api || typeof api.ingest_drop !== "function") return false;
+  try {
+    const result = await Promise.resolve(api.ingest_drop(payload));
+    window.dispatchEvent(new CustomEvent("dc-desktop-drop", { detail: result || {} }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function onDesktopNativeDrop(event) {
+  event.preventDefault();
+  if (event.dataTransfer?.files?.length) return;
+  ingestDesktopUriDrop(event).catch(() => {});
+}
+
 export function initDesktopShell() {
   if (desktopShellInitialized) return;
   desktopShellInitialized = true;
   if (!applyDesktopShellClass()) return;
+  window.dcDispatchDesktopDrop = (detail) => {
+    window.dispatchEvent(new CustomEvent("dc-desktop-drop", { detail: detail || {} }));
+  };
   document.addEventListener("contextmenu", onDesktopContextMenu);
   document.addEventListener("keydown", onDesktopBrowserKeys, true);
   document.addEventListener("click", onDesktopExternalLinkClick);
+  document.addEventListener("dragover", onDesktopDragOver);
+  document.addEventListener("drop", onDesktopNativeDrop);
   if (typeof window.open === "function") {
     originalWindowOpen = window.open.bind(window);
     window.open = onDesktopWindowOpen;
