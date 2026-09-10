@@ -26,6 +26,7 @@ echo "Ensuring pip-tools is available…"
 "$PY" -m pip install -q 'pip-tools>=7.4'
 
 echo "Compiling constraints.txt from pyproject.toml…"
+tmp="$(mktemp)"
 "$PY" -m piptools compile \
   --quiet \
   --resolver=backtracking \
@@ -34,16 +35,16 @@ echo "Compiling constraints.txt from pyproject.toml…"
   --strip-extras \
   --allow-unsafe \
   --no-emit-options \
-  --output-file=constraints.txt \
+  --output-file="$tmp" \
   pyproject.toml
 
 # Drop the editable self-reference if pip-tools emits the local project name.
 # Constraints files should only pin third-party distributions.
-if grep -qE '^deepcatalog(==| @)' constraints.txt 2>/dev/null; then
-  tmp="$(mktemp)"
-  grep -vE '^deepcatalog(==| @)' constraints.txt > "$tmp"
-  mv "$tmp" constraints.txt
+if grep -qE '^deepcatalog(==| @)' "$tmp" 2>/dev/null; then
+  grep -vE '^deepcatalog(==| @)' "$tmp" > "${tmp}.stripped"
+  mv "${tmp}.stripped" "$tmp"
 fi
+mv "$tmp" constraints.txt
 
 echo "✓ Wrote constraints.txt"
 echo "  Install runtime:  pip install -e . -c constraints.txt"

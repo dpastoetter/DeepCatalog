@@ -508,7 +508,7 @@ Installs are **fail-closed on provenance**: checksum files on the same GitHub Re
 CI also publishes **SLSA / Sigstore** artifact attestations for every official file (tarball, AppImage, installers, signed manifest, checksums). Independently:
 
 ```bash
-gh attestation verify deepcatalog-0.6.0.tar.gz \
+gh attestation verify deepcatalog-0.6.1.tar.gz \
   --repo dpastoetter/DeepCatalog \
   --cert-identity https://github.com/dpastoetter/DeepCatalog/.github/workflows/release.yml \
   --cert-oidc-issuer https://token.actions.githubusercontent.com
@@ -522,7 +522,7 @@ Official GitHub Release assets are published **only** by `.github/workflows/rele
 
 That pipeline runs when you:
 
-- push a version tag (`git tag v0.6.0 && git push origin v0.6.0`) — intended path
+- push a version tag (`git tag v0.6.1 && git push origin v0.6.1`) — intended path
 - publish a GitHub Release in the UI (or `gh release create`) for a `v*` tag — treated as a rebuild that replaces UI files
 - run **Actions → Release → Run workflow** *from that tag ref* (not a branch)
 
@@ -535,21 +535,21 @@ Do not attach files in the GitHub Release UI. The standalone **AppImage** workfl
 
 The packager archives the **exact tagged commit** (not a dirty working tree), verifies the file list against `git ls-tree`, and embeds `.release-commit` plus `.release-files` so installs/updates can confirm the SHA and prune stale paths.
 
-**Release checklist:** land every change on `main` first, bump `version` in `pyproject.toml` (the single source for package metadata, OpenAPI/`FastAPI.version`, and the in-app updater), regenerate pins if dependencies changed (`./scripts/lock-deps.sh`), commit, then create the matching tag on that commit (`git tag v0.6.0 && git push origin v0.6.0`). Tagging an older commit is how earlier releases missed later work. Publishing requires the Actions secret `DEEPCATALOG_RELEASE_SIGNING_KEY` (64-char hex Ed25519 seed, stored separately from `GITHUB_TOKEN`, preferably on the `official-release` environment) and an approval of that environment. Do not draft a GitHub Release with uploaded binaries.
+**Release checklist:** land every change on `main` first, bump `version` in `pyproject.toml` (the single source for package metadata, OpenAPI/`FastAPI.version`, and the in-app updater), regenerate pins if dependencies changed (`./scripts/lock-deps.sh`), commit, then create the matching tag on that commit (`git tag v0.6.1 && git push origin v0.6.1`). Tagging an older commit is how earlier releases missed later work. Publishing requires the Actions secret `DEEPCATALOG_RELEASE_SIGNING_KEY` (64-char hex Ed25519 seed, stored separately from `GITHUB_TOKEN`, preferably on the `official-release` environment) and an approval of that environment. Do not draft a GitHub Release with uploaded binaries.
 
 Local dry-run:
 
 ```bash
-git checkout v0.6.0
-./scripts/make-release-assets.sh v0.6.0
+git checkout v0.6.1
+./scripts/make-release-assets.sh v0.6.1
 # or before the tag exists:
-./scripts/make-release-assets.sh v0.6.0 HEAD
-# dist/ contains deepcatalog-0.6.0.tar.gz, install.sh, install.ps1, SHA256SUMS
+./scripts/make-release-assets.sh v0.6.1 HEAD
+# dist/ contains deepcatalog-0.6.1.tar.gz, install.sh, install.ps1, SHA256SUMS
 # CI then signs SHA256SUMS → release-manifest.json + .sig (needs DEEPCATALOG_RELEASE_SIGNING_KEY)
 
 # Linux x86_64 AppImage (needs poppler-utils + patchelf):
-./scripts/build-appimage.sh v0.6.0
-# dist/DeepCatalog-0.6.0-x86_64.AppImage
+./scripts/build-appimage.sh v0.6.1
+# dist/DeepCatalog-0.6.1-x86_64.AppImage
 ```
 
 ## Mockup mode

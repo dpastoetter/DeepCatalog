@@ -31,7 +31,10 @@ MANIFEST_SIG_NAME = "release-manifest.json.sig"
 
 # Raw 32-byte Ed25519 public key (hex). Private key is GitHub Actions secret
 # DEEPCATALOG_RELEASE_SIGNING_KEY — never GITHUB_TOKEN.
-RELEASE_VERIFY_KEY_HEX = "5334cfc14c39e6e44f658109ba6bfa42c00ad6a340a8cf796337a6649c5c8b60"
+# Public verify material only (not a credential).
+RELEASE_VERIFY_KEY_HEX = (
+    "5334cfc14c39e6e44f658109ba6bfa42c00ad6a340a8cf796337a6649c5c8b60"  # gitleaks:allow
+)
 
 # Sigstore / GitHub artifact attestations (CI). Used by gh attestation verify.
 SIGSTORE_OIDC_ISSUER = "https://token.actions.githubusercontent.com"

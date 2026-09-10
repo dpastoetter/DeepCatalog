@@ -28,7 +28,13 @@ AUDIT_SCRIPT_PATH = ROOT / "scripts" / "dependency-audit.sh"
 CHROMA_PACKAGES = frozenset({"chromadb", "chroma-hnswlib"})
 PYPI_CHROMADB = "https://pypi.org/pypi/chromadb/json"
 _PIN_RE = re.compile(r"^chromadb==([0-9][^\s#]+)", re.MULTILINE)
-_CHROMA_IGNORE_FLAGS = ("PYSEC-2026-311", "GHSA-f4j7-r4q5-qw2c")
+_CHROMA_IGNORE_FLAGS = (
+    "PYSEC-2026-311",
+    "GHSA-f4j7-r4q5-qw2c",
+    "PYSEC-2026-3813",
+    "PYSEC-2026-3814",
+    "PYSEC-2026-3815",
+)
 
 
 def pinned_chromadb_version(text: str) -> str:
@@ -116,8 +122,8 @@ def evaluate(
     if not chroma and ignores_chroma:
         reasons.append(
             "pip-audit no longer reports chromadb advisories on the pinned version; "
-            "remove --ignore-vuln PYSEC-2026-311 / GHSA-f4j7-r4q5-qw2c from "
-            "scripts/dependency-audit.sh."
+            "remove --ignore-vuln PYSEC-2026-311 / GHSA-f4j7-r4q5-qw2c / "
+            "PYSEC-2026-3813–3815 from scripts/dependency-audit.sh."
         )
     return reasons
 

@@ -142,6 +142,8 @@ def test_dependency_audit_documents_chroma_ignore_and_watch_script():
     audit = (_REPO / "scripts" / "dependency-audit.sh").read_text(encoding="utf-8")
     assert "--ignore-vuln PYSEC-2026-311" in audit
     assert "--ignore-vuln GHSA-f4j7-r4q5-qw2c" in audit
+    assert "--ignore-vuln PYSEC-2026-3814" in audit
+    assert "--ignore-vuln PYSEC-2026-3815" in audit
     assert "PersistentClient" in audit or "CVE-2026-45829" in audit
     watch = (_REPO / "scripts" / "chroma-advisory-watch.py").read_text(encoding="utf-8")
     assert '"--ignore-vuln"' not in watch

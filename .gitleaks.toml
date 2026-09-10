@@ -5,7 +5,7 @@ title = "DeepCatalog"
 useDefault = true
 
 [allowlist]
-description = "Test fixtures, lockfiles, and example env files"
+description = "Test fixtures, lockfiles, example env, and the public release verify key"
 paths = [
   '''(^|/)tests/''',
   '''(^|/)node_modules/''',
@@ -14,4 +14,9 @@ paths = [
   '''constraints\.txt$''',
   '''\.env\.example$''',
   '''(^|/)docs/''',
+]
+# Embedded Ed25519 *public* key for release-manifest verification (not a secret).
+# Listed by value so historical commits that introduced it are also allowed.
+regexes = [
+  '''5334cfc14c39e6e44f658109ba6bfa42c00ad6a340a8cf796337a6649c5c8b60''',
 ]
