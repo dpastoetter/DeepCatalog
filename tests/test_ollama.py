@@ -23,6 +23,8 @@ from deepcatalog.ollama_setup import (
     infer_model_processor,
     missing_models,
     model_name_matches,
+    normalize_ollama_model_choice,
+    ollama_model_catalog,
     ollama_status,
     resolve_installed_model,
     start_ollama,
@@ -415,6 +417,81 @@ def test_ollama_enable_api(client, monkeypatch, tmp_path):
     body = resp.json()
     assert body["applied"]["provider"] == "ollama"
     assert "nomic-embed-text" in body["ollama"]["missing_models"]
+    assert "gemma3" in {item["id"] for item in body["ollama"]["catalog"]["chat"]}
+
+
+def test_ollama_model_catalog_includes_curated_defaults():
+    catalog = ollama_model_catalog()
+    chat_ids = {item["id"] for item in catalog["chat"]}
+    embed_ids = {item["id"] for item in catalog["embed"]}
+    assert "gemma3" in chat_ids
+    assert "llama3.2-vision" in chat_ids
+    assert "nomic-embed-text" in embed_ids
+    assert "bge-m3" in embed_ids
+
+
+def test_normalize_ollama_model_choice_accepts_catalog_and_installed(monkeypatch):
+    monkeypatch.setattr(config, "MODEL_NAME", "gemma3")
+    monkeypatch.setattr(config, "EMBEDDING_MODEL", "nomic-embed-text")
+    assert normalize_ollama_model_choice("qwen2.5vl", kind="chat", installed=[]) == "qwen2.5vl"
+    assert (
+        normalize_ollama_model_choice("mxbai-embed-large", kind="embed", installed=[])
+        == "mxbai-embed-large"
+    )
+    assert (
+        normalize_ollama_model_choice("custom-vl:7b", kind="chat", installed=["custom-vl:7b"])
+        == "custom-vl:7b"
+    )
+    with pytest.raises(ValueError, match="Unknown Ollama chat model"):
+        normalize_ollama_model_choice("not-a-real-model", kind="chat", installed=[])
+
+
+def test_ollama_enable_api_rejects_unknown_model(client, monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    monkeypatch.setattr("deepcatalog.ollama_setup.env_path", lambda: env_file)
+    monkeypatch.setattr(
+        "deepcatalog.ollama_setup.probe_ollama",
+        lambda *_a, **_k: {
+            "reachable": True,
+            "base_url": "http://localhost:11434",
+            "models": [],
+            "version": "0.6.0",
+            "error": None,
+        },
+    )
+    resp = client.post(
+        "/api/ollama/enable",
+        json={"chat_model": "definitely-not-curated", "embedding_model": "nomic-embed-text"},
+    )
+    assert resp.status_code == 400
+    assert "Unknown Ollama" in resp.json()["detail"]
+
+
+def test_ollama_enable_api_persists_curated_models(client, monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    monkeypatch.setattr("deepcatalog.ollama_setup.env_path", lambda: env_file)
+    monkeypatch.setattr(
+        "deepcatalog.ollama_setup.probe_ollama",
+        lambda *_a, **_k: {
+            "reachable": True,
+            "listening": True,
+            "base_url": "http://localhost:11434",
+            "models": ["llama3.2-vision:latest", "bge-m3:latest"],
+            "version": "0.6.0",
+            "error": None,
+        },
+    )
+    resp = client.post(
+        "/api/ollama/enable",
+        json={"chat_model": "llama3.2-vision", "embedding_model": "bge-m3"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["applied"]["model"] == "llama3.2-vision"
+    assert body["applied"]["embedding_model"] == "bge-m3"
+    text = env_file.read_text(encoding="utf-8")
+    assert "DEEPCATALOG_MODEL=llama3.2-vision" in text
+    assert "DEEPCATALOG_EMBEDDING_MODEL=bge-m3" in text
 
 
 def test_llm_provider_api_switches_back(client, monkeypatch, tmp_path):

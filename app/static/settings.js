@@ -72,6 +72,10 @@ async function selectOllamaProvider({ enable = true, pullMissing = false, remote
   try {
     if (enable) {
       const payload = { pull_missing: pullMissing };
+      const chatModel = document.getElementById("ollama-chat-model")?.value?.trim();
+      const embedModel = document.getElementById("ollama-embed-model")?.value?.trim();
+      if (chatModel) payload.chat_model = chatModel;
+      if (embedModel) payload.embedding_model = embedModel;
       if (remote) {
         const url = document.getElementById("ollama-base-url")?.value?.trim();
         if (!url) {
@@ -374,6 +378,16 @@ export function settingsShellHtml() {
                 Approve the disclaimer below before enabling.
               </p>
             </div>
+            <div class="ollama-model-fields">
+              <label class="field">
+                <span>Chat model (vision)</span>
+                <select id="ollama-chat-model"></select>
+              </label>
+              <label class="field">
+                <span>Embedding model</span>
+                <select id="ollama-embed-model"></select>
+              </label>
+            </div>
             <div class="actions ollama-actions">
               <button id="ollama-start" type="button" class="btn secondary" disabled>Start Ollama</button>
               <button id="ollama-enable" type="button" class="btn primary">Use Ollama</button>
@@ -383,8 +397,8 @@ export function settingsShellHtml() {
               <button id="ollama-refresh" type="button" class="btn ghost">Refresh</button>
             </div>
             <p class="fine">
-              Needs a multimodal chat model (default <code>gemma3</code>) plus
-              <code>nomic-embed-text</code> for search.
+              Chat must be multimodal (page images for OCR). Changing the embedding model
+              marks the search index stale so it rebuilds on next use.
               <a class="text-link" href="https://ollama.com/download" target="_blank" rel="noopener">Download Ollama</a>
             </p>
           </div>
@@ -734,6 +748,10 @@ export function initSettings() {
       }
       // Ensure provider is ollama first, then pull whatever is still missing.
       const payload = { pull_missing: true };
+      const chatModel = document.getElementById("ollama-chat-model")?.value?.trim();
+      const embedModel = document.getElementById("ollama-embed-model")?.value?.trim();
+      if (chatModel) payload.chat_model = chatModel;
+      if (embedModel) payload.embedding_model = embedModel;
       if (ollamaRemoteMode) {
         const url = document.getElementById("ollama-base-url")?.value?.trim();
         if (!url) {
@@ -1052,22 +1070,25 @@ export function initSettings() {
         return;
       }
       if (data.update_available) {
-        if (data.installable === false) {
-          const link = data.appimage_url || data.html_url;
+        if (updateApplyAllowed(data)) {
+          const kind = data.artifact_kind === "appimage" ? "AppImage" : "release";
           setUpdateStatus(
-            `Update available: v${data.current_version} → v${data.latest_version}. ` +
-              "This AppImage cannot update in place — download the new AppImage from GitHub" +
-              (link ? ` (${link})` : "") +
-              ".",
-            "warn",
-          );
-          showUpdateButtons({});
-        } else if (updateApplyAllowed(data)) {
-          setUpdateStatus(
-            `Update available: v${data.current_version} → v${data.latest_version} (signed manifest verified)`,
+            `Update available: v${data.current_version} → v${data.latest_version} ` +
+              `(signed ${kind} verified)`,
             "warn",
           );
           showUpdateButtons({ apply: true });
+        } else if (data.installable === false && data.appimage) {
+          const link = data.appimage_url || data.html_url;
+          setUpdateStatus(
+            data.verification_error ||
+              (`Update available: v${data.current_version} → v${data.latest_version}. ` +
+                "This AppImage cannot be replaced here" +
+                (link ? ` — download from GitHub (${link})` : "") +
+                "."),
+            "warn",
+          );
+          showUpdateButtons({});
         } else {
           setUpdateStatus(
             data.verification_error ||

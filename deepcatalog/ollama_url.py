@@ -435,6 +435,8 @@ def ollama_async_client(*, origin: str, timeout: float) -> httpx.AsyncClient:
 def public_ollama_config_error(exc: BaseException) -> str:
     """Stable API message for Ollama URL / config validation failures."""
     raw = exc.args[0] if exc.args and isinstance(exc.args[0], str) else ""
+    if "Unknown Ollama" in raw and "model" in raw:
+        return raw
     if any(token in raw for token in ("link-local", "metadata", "blocked", "not allowed")):
         return "Ollama URL is not allowed (blocked address)"
     if ALLOWED_HOSTS_ENV in raw or "allowlist" in raw.lower():

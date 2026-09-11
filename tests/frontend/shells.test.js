@@ -68,6 +68,8 @@ describe("view shells", () => {
       "ask-examples-toggle",
       "update-check",
       "clear-all-data",
+      "ollama-chat-model",
+      "ollama-embed-model",
     ]) {
       expect(html).toContain(`id="${id}"`);
     }

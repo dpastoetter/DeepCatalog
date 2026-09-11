@@ -380,6 +380,53 @@ function formatOllamaCompute(ollama) {
   return ` · ${label}`;
 }
 
+export function fillOllamaModelSelects(ollama) {
+  /** Rebuild chat/embed dropdowns from catalog ∪ installed ∪ current config. */
+  const chatSelect = document.getElementById("ollama-chat-model");
+  const embedSelect = document.getElementById("ollama-embed-model");
+  if (!chatSelect && !embedSelect) return;
+
+  const catalog = ollama?.catalog || {};
+  const installed = Array.isArray(ollama?.installed_models) ? ollama.installed_models : [];
+
+  function fill(select, kind, current) {
+    if (!select) return;
+    const previous = select.value;
+    const entries = Array.isArray(catalog[kind]) ? catalog[kind] : [];
+    const byId = new Map();
+    for (const item of entries) {
+      const id = String(item?.id || "").trim();
+      if (!id) continue;
+      byId.set(id, String(item?.label || id));
+    }
+    for (const tag of installed) {
+      const id = String(tag || "").trim();
+      if (!id || byId.has(id)) continue;
+      byId.set(id, `${id} (installed)`);
+    }
+    const selected = String(current || previous || "").trim();
+    if (selected && !byId.has(selected)) {
+      byId.set(selected, `${selected} (configured)`);
+    }
+    const options = [...byId.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    select.innerHTML = "";
+    for (const [id, label] of options) {
+      const opt = document.createElement("option");
+      opt.value = id;
+      opt.textContent = label;
+      select.appendChild(opt);
+    }
+    if (selected && byId.has(selected)) {
+      select.value = selected;
+    } else if (options.length) {
+      select.value = options[0][0];
+    }
+  }
+
+  fill(chatSelect, "chat", ollama?.chat_model);
+  fill(embedSelect, "embed", ollama?.embedding_model);
+}
+
 export function renderOllamaStatus(ollama) {
   const statusEl = document.getElementById("ollama-status");
   const hintEl = document.getElementById("ollama-hint");
@@ -387,6 +434,7 @@ export function renderOllamaStatus(ollama) {
     document.getElementById("auth-section") || document.getElementById("settings-ai");
   const pullBtn = document.getElementById("ollama-pull");
   const startBtn = document.getElementById("ollama-start");
+  fillOllamaModelSelects(ollama);
   if (!ollama) {
     if (statusEl) statusEl.textContent = "Ollama status unavailable";
     if (startBtn) startBtn.disabled = true;

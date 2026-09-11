@@ -57,6 +57,22 @@ START_POLL_INTERVAL = 0.4
 OLLAMA_CHAT_TIMEOUT = float(os.getenv("DEEPCATALOG_OLLAMA_TIMEOUT", "300"))
 _TAGS_CACHE_TTL = 30.0
 
+# Curated Settings catalog — multimodal chat for OCR + open embed models.
+OLLAMA_CHAT_CATALOG: tuple[dict[str, str], ...] = (
+    {"id": "gemma3", "label": "Gemma 3 (default)"},
+    {"id": "llama3.2-vision", "label": "Llama 3.2 Vision"},
+    {"id": "qwen2.5vl", "label": "Qwen2.5-VL"},
+    {"id": "minicpm-v", "label": "MiniCPM-V"},
+    {"id": "llava", "label": "LLaVA"},
+    {"id": "moondream", "label": "Moondream (small)"},
+)
+OLLAMA_EMBED_CATALOG: tuple[dict[str, str], ...] = (
+    {"id": "nomic-embed-text", "label": "nomic-embed-text (768-d, default)"},
+    {"id": "mxbai-embed-large", "label": "mxbai-embed-large (1024-d)"},
+    {"id": "bge-m3", "label": "bge-m3 (1024-d)"},
+    {"id": "all-minilm", "label": "all-minilm (384-d)"},
+)
+
 _ENV_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 # (expires_at, base_url, models)
 _tags_cache: tuple[float, str, list[str]] | None = None
@@ -128,6 +144,71 @@ def clear_ollama_tags_cache() -> None:
     global _tags_cache, _ready_cache
     _tags_cache = None
     _ready_cache = None
+
+
+def ollama_model_catalog() -> dict[str, list[dict[str, str]]]:
+    """Curated chat (vision) and embed models for Settings pickers."""
+    return {
+        "chat": [dict(item) for item in OLLAMA_CHAT_CATALOG],
+        "embed": [dict(item) for item in OLLAMA_EMBED_CATALOG],
+    }
+
+
+def _catalog_ids(kind: str) -> frozenset[str]:
+    if kind == "chat":
+        return frozenset(item["id"] for item in OLLAMA_CHAT_CATALOG)
+    if kind == "embed":
+        return frozenset(item["id"] for item in OLLAMA_EMBED_CATALOG)
+    raise ValueError(f"unknown Ollama model kind: {kind}")
+
+
+def normalize_ollama_model_choice(
+    name: str | None,
+    *,
+    kind: str,
+    installed: list[str] | None = None,
+) -> str:
+    """
+    Accept a curated catalog id, an installed tag, or the currently configured name.
+
+    Returns the stripped choice. Raises ``ValueError`` for unknown names so the
+    Settings API cannot persist arbitrary pull targets.
+    """
+    cleaned = (name or "").strip()
+    if kind == "chat":
+        default = DEFAULT_CHAT_MODEL
+        current = (config.MODEL_NAME or "").strip()
+    elif kind == "embed":
+        default = DEFAULT_EMBED_MODEL
+        current = (config.EMBEDDING_MODEL or "").strip()
+    else:
+        raise ValueError(f"unknown Ollama model kind: {kind}")
+
+    if not cleaned:
+        return default
+
+    catalog_ids = _catalog_ids(kind)
+    if any(
+        model_name_matches(cleaned, catalog_id) or model_name_matches(catalog_id, cleaned)
+        for catalog_id in catalog_ids
+    ):
+        return cleaned
+
+    tags = list(installed) if installed is not None else list_installed_models()
+    if any(model_name_matches(tag, cleaned) or model_name_matches(cleaned, tag) for tag in tags):
+        return cleaned
+
+    if current and (
+        cleaned == current
+        or model_name_matches(cleaned, current)
+        or model_name_matches(current, cleaned)
+    ):
+        return cleaned
+
+    raise ValueError(
+        f"Unknown Ollama {kind} model {cleaned!r}. "
+        "Pick a curated model from Settings or an already-installed Ollama tag."
+    )
 
 
 def list_installed_models(base_url: str | None = None) -> list[str]:
@@ -541,7 +622,10 @@ def apply_llm_provider(
 
     remote_enabled = False
     if normalized == "ollama":
-        chat, embed = required_models(chat_model=model, embed_model=embedding_model)
+        chat_raw, embed_raw = required_models(chat_model=model, embed_model=embedding_model)
+        installed = list_installed_models(base_url)
+        chat = normalize_ollama_model_choice(chat_raw, kind="chat", installed=installed)
+        embed = normalize_ollama_model_choice(embed_raw, kind="embed", installed=installed)
         candidate = (
             base_url
             if base_url is not None
@@ -624,6 +708,7 @@ def apply_llm_provider(
 
 def ollama_status(*, base_url: str | None = None) -> dict[str, Any]:
     """Full status payload for Settings UI / diagnostics enrichment."""
+    catalog = ollama_model_catalog()
     try:
         url = resolved_ollama_base_url(base_url)
     except ValueError:
@@ -640,6 +725,7 @@ def ollama_status(*, base_url: str | None = None) -> dict[str, Any]:
             "is_local": is_loopback_ollama_url(raw),
             "version": None,
             "installed_models": [],
+            "catalog": catalog,
             "chat_model": chat,
             "embedding_model": embed,
             "resolved_chat_model": None,
@@ -687,6 +773,7 @@ def ollama_status(*, base_url: str | None = None) -> dict[str, Any]:
         "is_local": bool(probe.get("is_local", is_loopback_ollama_url(url))),
         "version": probe.get("version"),
         "installed_models": installed,
+        "catalog": catalog,
         "chat_model": chat,
         "embedding_model": embed,
         "resolved_chat_model": resolved_chat,

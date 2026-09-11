@@ -45,7 +45,7 @@ describe("updateApplyAllowed", () => {
     ).toBe(false);
   });
 
-  it("hides apply for AppImage installs", () => {
+  it("hides apply when AppImage is not installable", () => {
     expect(
       updateApplyAllowed({
         update_available: true,
@@ -54,5 +54,17 @@ describe("updateApplyAllowed", () => {
         installable: false,
       }),
     ).toBe(false);
+  });
+
+  it("allows apply for a signed AppImage when installable", () => {
+    expect(
+      updateApplyAllowed({
+        update_available: true,
+        signed: true,
+        verifiable: true,
+        installable: true,
+        artifact_kind: "appimage",
+      }),
+    ).toBe(true);
   });
 });

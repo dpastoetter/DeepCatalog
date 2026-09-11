@@ -5,10 +5,12 @@ import {
   displayText,
   errorMessage,
   escapeHtml,
+  fillOllamaModelSelects,
   formatApiError,
   isFinancialDocType,
   referenceIdsToString,
 } from "../../app/static/api.js";
+import { settingsShellHtml } from "../../app/static/settings.js";
 
 describe("formatApiError", () => {
   it("prefers string detail", () => {
@@ -128,5 +130,35 @@ describe("api()", () => {
     const headers = fetchMock.mock.calls[0][1].headers;
     expect(headers.Authorization || headers.authorization).toBeUndefined();
     expect(fetchMock.mock.calls[0][1].credentials).toBe("same-origin");
+  });
+});
+
+describe("fillOllamaModelSelects", () => {
+  beforeEach(() => {
+    document.body.innerHTML = settingsShellHtml();
+  });
+
+  it("renders catalog options and selects configured models", () => {
+    fillOllamaModelSelects({
+      catalog: {
+        chat: [
+          { id: "gemma3", label: "Gemma 3 (default)" },
+          { id: "llava", label: "LLaVA" },
+        ],
+        embed: [
+          { id: "nomic-embed-text", label: "nomic-embed-text" },
+          { id: "bge-m3", label: "bge-m3" },
+        ],
+      },
+      installed_models: ["custom-vl:7b"],
+      chat_model: "llava",
+      embedding_model: "bge-m3",
+    });
+    const chat = document.getElementById("ollama-chat-model");
+    const embed = document.getElementById("ollama-embed-model");
+    expect(chat.value).toBe("llava");
+    expect(embed.value).toBe("bge-m3");
+    expect([...chat.options].map((o) => o.value)).toContain("custom-vl:7b");
+    expect([...chat.options].map((o) => o.value)).toContain("gemma3");
   });
 });

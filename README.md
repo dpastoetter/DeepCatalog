@@ -90,7 +90,11 @@ chmod +x DeepCatalog-*-x86_64.AppImage
 ./DeepCatalog-*-x86_64.AppImage
 ```
 
-The release asset is versioned (`DeepCatalog-<version>-x86_64.AppImage`). User data, `.env`, and the SQLite/Chroma stores live in `~/.local/share/deepcatalog` — not inside the image. To update, download the new AppImage and replace the file (Settings can *check* for updates but cannot rewrite a mounted AppImage). Autostart from Settings writes a systemd user unit that launches this AppImage with `--headless`.
+The release asset is versioned (`DeepCatalog-<version>-x86_64.AppImage`). User data, `.env`, and the SQLite/Chroma stores live in `~/.local/share/deepcatalog` — not inside the image.
+
+**In-app updates:** keep the AppImage on a writable path (for example `~/Applications/DeepCatalog.AppImage`). **Settings → Software update** downloads the signed AppImage from the release manifest, verifies SHA-256, replaces that file on disk, and relaunches. It does not rewrite the mounted squashfs. If the path is not writable, Settings still shows the newer version and links the GitHub asset for a manual replace.
+
+Autostart from Settings writes a systemd user unit that launches this AppImage with `--headless`.
 
 **Uninstall:** delete the AppImage and, if you want to drop local data, `rm -rf ~/.local/share/deepcatalog`. Disable Settings → Autostart first (or `systemctl --user disable deepcatalog.service`).
 
@@ -266,13 +270,13 @@ Remote Ollama (a server on another host) is **not** fully local — document dat
 
 1. Install [Ollama](https://ollama.com/download) and make sure it is running (`ollama serve`), or use **Start Ollama** in Settings when the CLI is installed but the daemon is down.
 2. Open the app → **Settings → AI provider → Local Ollama**.
-3. Click **Pull required models** (defaults: multimodal `gemma3` + `nomic-embed-text`).
+3. Pick a **chat** model and an **embedding** model from the curated lists (defaults: multimodal `gemma3` + `nomic-embed-text`), then click **Pull required models**.
 
-That writes the provider into `.env` and switches the running app — no manual restart for the provider change. You can still configure it by hand:
+That writes the provider and model names into `.env` and switches the running app — no manual restart for the provider change. You can still configure it by hand:
 
 ```bash
-ollama pull gemma3            # or llama3.2-vision, qwen2.5vl, minicpm-v
-ollama pull nomic-embed-text  # embeddings for RAG
+ollama pull gemma3            # or llama3.2-vision, qwen2.5vl, minicpm-v, llava, moondream
+ollama pull nomic-embed-text  # or mxbai-embed-large, bge-m3, all-minilm
 ```
 
 ```bash
@@ -501,14 +505,21 @@ If you switch embedding providers or models (Gemini / OpenAI / Ollama / local ON
 
 ## Updates
 
-**Settings → Software update** checks GitHub Releases for `dpastoetter/DeepCatalog` and can download and install the latest version in place. Your documents, database, settings, and credentials (`data/`, `.env`) are never touched by an update.
+**Settings → Software update** checks GitHub Releases for `dpastoetter/DeepCatalog` and can download and install the latest **signed** release in place. Your documents, database, settings, and credentials (`data/`, `.env`, or `~/.local/share/deepcatalog` for AppImage) are never touched by an update.
 
-Installs are **fail-closed on provenance**: checksum files on the same GitHub Release are not authentic (whoever can upload `evil.tar.gz` can upload a matching `SHA256SUMS`). The updater requires an **Ed25519-signed** `release-manifest.json` whose public key is embedded in the app (`deepcatalog/release_trust.py`). The manifest binds the GitHub tag, the 40-character commit SHA, and each artifact’s SHA-256. After download, the archive hash must match the manifest and the packed `.release-commit` must match that commit. Tag-only or checksum-only releases are shown but refused at install time. `DEEPCATALOG_UPDATE_REPO` is ignored by the in-app updater so an environment change cannot redirect the trust root; forks must change `DEFAULT_UPDATE_REPO` and the verify key in source. Update checks retry on transient network failures. **AppImage installs cannot be updated in place** (the squashfs is read-only) — Settings still reports a newer tag and links the GitHub AppImage asset; replace the file yourself.
+| Install type | What “Download & install” does |
+| --- | --- |
+| Source / venv | Downloads the signed `.tar.gz`, verifies Ed25519 manifest + SHA-256 + `.release-commit`, extracts into the install directory (preserves `data/`, `.env`, `.venv`) |
+| AppImage | Downloads the signed `.AppImage` listed in the manifest, verifies SHA-256, atomically replaces the outer `$APPIMAGE` file, then relaunches that path |
+
+Keep the AppImage somewhere writable. If `$APPIMAGE` is missing or not writable, Settings reports the newer version and links the GitHub asset instead of offering install.
+
+Installs are **fail-closed on provenance**: checksum files on the same GitHub Release are not authentic (whoever can upload `evil.tar.gz` can upload a matching `SHA256SUMS`). The updater requires an **Ed25519-signed** `release-manifest.json` whose public key is embedded in the app (`deepcatalog/release_trust.py`). The manifest binds the GitHub tag, the 40-character commit SHA, and each artifact’s SHA-256. Tag-only or checksum-only releases are shown but refused at install time. `DEEPCATALOG_UPDATE_REPO` is ignored by the in-app updater so an environment change cannot redirect the trust root; forks must change `DEFAULT_UPDATE_REPO` and the verify key in source. Update checks retry on transient network failures.
 
 CI also publishes **SLSA / Sigstore** artifact attestations for every official file (tarball, AppImage, installers, signed manifest, checksums). Independently:
 
 ```bash
-gh attestation verify deepcatalog-0.6.5.tar.gz \
+gh attestation verify deepcatalog-0.7.0.tar.gz \
   --repo dpastoetter/DeepCatalog \
   --cert-identity https://github.com/dpastoetter/DeepCatalog/.github/workflows/release.yml \
   --cert-oidc-issuer https://token.actions.githubusercontent.com
@@ -522,7 +533,7 @@ Official GitHub Release assets are published **only** by `.github/workflows/rele
 
 That pipeline runs when you:
 
-- push a version tag (`git tag v0.6.5 && git push origin v0.6.5`) — intended path
+- push a version tag (`git tag v0.7.0 && git push origin v0.7.0`) — intended path
 - publish a GitHub Release in the UI (or `gh release create`) for a `v*` tag — treated as a rebuild that replaces UI files
 - run **Actions → Release → Run workflow** *from that tag ref* (not a branch)
 
@@ -548,8 +559,8 @@ git checkout v0.6.5
 # CI then signs SHA256SUMS → release-manifest.json + .sig (needs DEEPCATALOG_RELEASE_SIGNING_KEY)
 
 # Linux x86_64 AppImage (needs poppler-utils + patchelf):
-./scripts/build-appimage.sh v0.6.5
-# dist/DeepCatalog-0.6.5-x86_64.AppImage
+./scripts/build-appimage.sh v0.7.0
+# dist/DeepCatalog-0.7.0-x86_64.AppImage
 ```
 
 ## Mockup mode

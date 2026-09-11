@@ -384,6 +384,22 @@
     base_url: "http://localhost:11434",
     version: "0.6.0",
     installed_models: ["gemma3:latest", "nomic-embed-text:latest"],
+    catalog: {
+      chat: [
+        { id: "gemma3", label: "Gemma 3 (default)" },
+        { id: "llama3.2-vision", label: "Llama 3.2 Vision" },
+        { id: "qwen2.5vl", label: "Qwen2.5-VL" },
+        { id: "minicpm-v", label: "MiniCPM-V" },
+        { id: "llava", label: "LLaVA" },
+        { id: "moondream", label: "Moondream (small)" },
+      ],
+      embed: [
+        { id: "nomic-embed-text", label: "nomic-embed-text (768-d, default)" },
+        { id: "mxbai-embed-large", label: "mxbai-embed-large (1024-d)" },
+        { id: "bge-m3", label: "bge-m3 (1024-d)" },
+        { id: "all-minilm", label: "all-minilm (384-d)" },
+      ],
+    },
     chat_model: "gemma3",
     embedding_model: "nomic-embed-text",
     missing_models: [],

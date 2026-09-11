@@ -38,12 +38,15 @@ def api_update_apply() -> dict[str, Any]:
         raw_error = result.get("error")
         error = raw_error if isinstance(raw_error, str) else ""
         lowered = error.lower()
-        if "appimage" in lowered:
+        if "appimage" in lowered and (
+            "not writable" in lowered or "missing" in lowered or "cannot replace" in lowered
+        ):
             detail = (
-                "This AppImage cannot be updated in place. "
-                "Download the latest DeepCatalog-*-x86_64.AppImage from GitHub "
-                "Releases and replace this file."
+                "AppImage path is missing or not writable — download the new AppImage "
+                "from GitHub Releases and replace this file."
             )
+        elif "cannot be updated in place" in lowered or "cannot update in place" in lowered:
+            detail = error or "This install cannot be updated in place."
         elif "up to date" in lowered:
             detail = "Already up to date."
         elif (

@@ -23,6 +23,7 @@ from deepcatalog.release_trust import (
 from deepcatalog.updater import (
     _github_get,
     _pick_appimage_asset,
+    apply_appimage_bytes,
     apply_tarball,
     apply_update,
     check_for_update,
@@ -265,6 +266,8 @@ def test_apply_update_refuses_checksum_mismatch(isolated_root, monkeypatch):
             "update_available": True,
             "verifiable": True,
             "signed": True,
+            "installable": True,
+            "artifact_kind": "tarball",
             "manifest_commit": "a" * 40,
             "download_url": "https://example.invalid/deepcatalog-9.9.9.tar.gz",
             "expected_sha256": "0" * 64,
@@ -288,6 +291,8 @@ def test_apply_update_refuses_unsigned_even_with_checksum(monkeypatch):
             "update_available": True,
             "verifiable": True,
             "signed": False,
+            "installable": True,
+            "artifact_kind": "tarball",
             "download_url": "https://example.invalid/deepcatalog-9.9.9.tar.gz",
             "expected_sha256": "a" * 64,
             "verification_error": None,
@@ -317,6 +322,8 @@ def test_apply_update_installs_verified_release(isolated_root, monkeypatch):
             "update_available": True,
             "verifiable": True,
             "signed": True,
+            "installable": True,
+            "artifact_kind": "tarball",
             "manifest_commit": commit,
             "download_url": (
                 "https://github.com/dpastoetter/DeepCatalog/releases/download/"
@@ -578,9 +585,64 @@ def test_pick_appimage_prefers_x86_64():
     assert chosen["name"].endswith("x86_64.AppImage")
 
 
-def test_apply_update_refuses_appimage(monkeypatch):
+def test_apply_appimage_bytes_replaces_target(tmp_path):
+    target = tmp_path / "DeepCatalog.AppImage"
+    target.write_bytes(b"old-bytes")
+    result = apply_appimage_bytes(b"new-appimage-payload", target=target)
+    assert result["status"] == "success"
+    assert target.read_bytes() == b"new-appimage-payload"
+    assert target.stat().st_mode & 0o111  # executable
+
+
+def test_apply_update_installs_appimage(monkeypatch, tmp_path):
+    target = tmp_path / "DeepCatalog.AppImage"
+    target.write_bytes(b"old")
+    payload = b"signed-appimage-bytes"
+    digest = sha256_hex(payload)
     monkeypatch.setattr("deepcatalog.updater.running_as_appimage", lambda: True)
+    monkeypatch.setenv("APPIMAGE", str(target))
+    monkeypatch.setattr(
+        "deepcatalog.updater.check_for_update",
+        lambda: {
+            "status": "success",
+            "current_version": "0.1.0",
+            "latest_version": "9.9.9",
+            "update_available": True,
+            "verifiable": True,
+            "signed": True,
+            "installable": True,
+            "artifact_kind": "appimage",
+            "download_url": "https://example.invalid/DeepCatalog-9.9.9-x86_64.AppImage",
+            "expected_sha256": digest,
+            "artifact_name": "DeepCatalog-9.9.9-x86_64.AppImage",
+            "manifest_commit": "a" * 40,
+        },
+    )
+    monkeypatch.setattr("deepcatalog.updater._download_bytes", lambda _url: payload)
+    result = apply_update()
+    assert result["status"] == "success"
+    assert result["artifact_kind"] == "appimage"
+    assert result["restart_required"] is True
+    assert target.read_bytes() == payload
+
+
+def test_apply_update_refuses_appimage_when_not_installable(monkeypatch):
+    monkeypatch.setattr("deepcatalog.updater.running_as_appimage", lambda: True)
+    monkeypatch.setattr(
+        "deepcatalog.updater.check_for_update",
+        lambda: {
+            "status": "success",
+            "current_version": "0.1.0",
+            "latest_version": "9.9.9",
+            "update_available": True,
+            "verifiable": True,
+            "signed": True,
+            "installable": False,
+            "artifact_kind": "appimage",
+            "verification_error": "AppImage path is missing or not writable — cannot replace this file in place.",
+        },
+    )
     result = apply_update()
     assert result["status"] == "error"
     assert result["installable"] is False
-    assert "AppImage" in result["error"]
+    assert "writable" in result["error"].lower()

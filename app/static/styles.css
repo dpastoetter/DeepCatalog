@@ -1835,6 +1835,28 @@ input:focus-visible, textarea:focus-visible, select:focus-visible {
   margin-top: 0.75rem;
 }
 
+.ollama-model-fields {
+  display: grid;
+  gap: 0.65rem;
+  margin-top: 0.75rem;
+}
+
+@media (min-width: 640px) {
+  .ollama-model-fields {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.ollama-model-fields select {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: var(--inset);
+  color: var(--ink);
+  border-radius: var(--radius-sm);
+  padding: 0.62rem 0.75rem;
+  outline: none;
+}
+
 .ollama-actions {
   display: flex;
   flex-wrap: wrap;

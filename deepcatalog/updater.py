@@ -242,6 +242,36 @@ def _select_signed_artifact(
         "download_url": url,
         "expected_sha256": expected,
         "source": "signed-manifest",
+        "kind": "tarball",
+    }
+
+
+def _select_signed_appimage_artifact(
+    release: dict[str, Any],
+    *,
+    manifest: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Choose the AppImage whose SHA-256 is listed in the signed manifest."""
+    assets = [
+        asset
+        for asset in (release.get("assets") or [])
+        if isinstance(asset, dict) and isinstance(asset.get("name"), str)
+    ]
+    image = _pick_appimage_asset(assets)
+    if image is None:
+        return None
+    expected = artifact_sha256(manifest, image["name"])
+    if not expected:
+        return None
+    url = _asset_url(image)
+    if not url:
+        return None
+    return {
+        "filename": image["name"],
+        "download_url": url,
+        "expected_sha256": expected,
+        "source": "signed-manifest",
+        "kind": "appimage",
     }
 
 
@@ -301,6 +331,7 @@ def _fetch_latest_release() -> dict[str, Any] | None:
                 "verifiable": False,
                 "signed": False,
                 "artifact": None,
+                "appimage_artifact": None,
                 "verification_error": (
                     "No GitHub release with a signed release manifest. "
                     "Tag-only installs are disabled."
@@ -330,6 +361,7 @@ def _fetch_latest_release() -> dict[str, Any] | None:
         manifest, manifest_error = _load_signed_manifest(client, typed_assets)
         if manifest is None:
             release["artifact"] = None
+            release["appimage_artifact"] = None
             release["verifiable"] = False
             release["verification_error"] = manifest_error or _unsigned_release_error()
             return release
@@ -343,27 +375,54 @@ def _fetch_latest_release() -> dict[str, Any] | None:
             bind_error = "Signed manifest commit does not match the release tag commit."
         if bind_error:
             release["artifact"] = None
+            release["appimage_artifact"] = None
             release["verifiable"] = False
             release["verification_error"] = bind_error
             return release
 
         artifact = _select_signed_artifact(release, manifest=manifest)
+        appimage_artifact = _select_signed_appimage_artifact(release, manifest=manifest)
         release["artifact"] = artifact
+        release["appimage_artifact"] = appimage_artifact
         release["signed"] = True
         release["manifest_commit"] = manifest["commit"]
-        release["verifiable"] = artifact is not None
-        release["verification_error"] = (
-            None
-            if artifact is not None
-            else ("Signed manifest does not list a SHA-256 for the release .tar.gz asset.")
-        )
+        release["verifiable"] = artifact is not None or appimage_artifact is not None
+        if artifact is not None or appimage_artifact is not None:
+            release["verification_error"] = None
+        else:
+            release["verification_error"] = (
+                "Signed manifest does not list a SHA-256 for the release "
+                ".tar.gz or .AppImage asset."
+            )
         return release
+
+
+def appimage_update_target() -> Path | None:
+    """Writable path of the running AppImage file, if self-replace is possible."""
+    raw = os.getenv("APPIMAGE", "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    try:
+        if not path.is_file():
+            return None
+        parent = path.parent
+        if not os.access(parent, os.W_OK | os.X_OK):
+            return None
+        # Need to create a sibling temp file and replace the existing image.
+        if path.exists() and not os.access(path, os.W_OK):
+            # Still OK if we can unlink+replace via directory write bits.
+            if not os.access(parent, os.W_OK):
+                return None
+        return path.resolve()
+    except OSError:
+        return None
 
 
 def check_for_update() -> dict[str, Any]:
     """Compare the installed version against the latest GitHub release."""
     current = get_current_version()
-    installable = not running_as_appimage()
+    is_appimage = running_as_appimage()
     base = {
         "status": "success",
         "repo": update_repo(),
@@ -371,8 +430,8 @@ def check_for_update() -> dict[str, Any]:
         "update_available": False,
         "verifiable": False,
         "signed": False,
-        "installable": installable,
-        "appimage": running_as_appimage(),
+        "installable": False,
+        "appimage": is_appimage,
     }
     try:
         latest = _fetch_latest_release()
@@ -387,7 +446,13 @@ def check_for_update() -> dict[str, Any]:
     if latest is None:
         return {**base, "message": "No releases or tags published on GitHub yet."}
 
-    artifact = latest.get("artifact") or {}
+    tarball = latest.get("artifact") or {}
+    appimage_art = latest.get("appimage_artifact") or {}
+    if not isinstance(tarball, dict):
+        tarball = {}
+    if not isinstance(appimage_art, dict):
+        appimage_art = {}
+
     raw_assets = latest.get("assets") or []
     assets = raw_assets if isinstance(raw_assets, list) else []
     appimage = _pick_appimage_asset(assets)
@@ -397,6 +462,36 @@ def check_for_update() -> dict[str, Any]:
         appimage_name = appimage.get("name")
         url = appimage.get("browser_download_url") or appimage.get("url")
         appimage_url = url if isinstance(url, str) and url else None
+
+    if is_appimage:
+        active = appimage_art
+        target = appimage_update_target()
+        installable = bool(
+            latest.get("signed")
+            and active.get("download_url")
+            and active.get("expected_sha256")
+            and target is not None
+        )
+        verification_error = latest.get("verification_error")
+        if latest.get("signed") and not active.get("download_url"):
+            verification_error = "Signed manifest does not list a SHA-256 for the release AppImage."
+        elif latest.get("signed") and target is None:
+            verification_error = (
+                "AppImage path is missing or not writable — cannot replace this file "
+                "in place. Download the new AppImage manually from GitHub Releases."
+            )
+        verifiable = bool(active.get("download_url") and active.get("expected_sha256"))
+    else:
+        active = tarball
+        installable = bool(
+            latest.get("signed")
+            and active.get("download_url")
+            and active.get("expected_sha256")
+            and latest.get("manifest_commit")
+        )
+        verification_error = latest.get("verification_error")
+        verifiable = bool(latest.get("verifiable") and active.get("download_url"))
+
     return {
         **base,
         "latest_version": latest["tag"].lstrip("v"),
@@ -409,14 +504,17 @@ def check_for_update() -> dict[str, Any]:
         "commit_sha": latest.get("commit_sha"),
         "manifest_commit": latest.get("manifest_commit"),
         "update_available": is_newer(latest["tag"], current),
-        "verifiable": bool(latest.get("verifiable")),
+        "verifiable": verifiable,
         "signed": bool(latest.get("signed")),
-        "verification_error": latest.get("verification_error"),
-        "artifact_name": artifact.get("filename"),
-        "expected_sha256": artifact.get("expected_sha256"),
-        "download_url": artifact.get("download_url"),
-        "appimage_name": appimage_name,
-        "appimage_url": appimage_url,
+        "verification_error": verification_error,
+        "installable": installable,
+        "artifact_name": active.get("filename"),
+        "expected_sha256": active.get("expected_sha256"),
+        "download_url": active.get("download_url"),
+        "artifact_kind": active.get("kind") or ("appimage" if is_appimage else "tarball"),
+        "appimage_name": appimage_name or appimage_art.get("filename"),
+        "appimage_url": appimage_url or appimage_art.get("download_url"),
+        "appimage_target": str(appimage_update_target()) if is_appimage else None,
     }
 
 
@@ -608,18 +706,49 @@ def apply_tarball(
     }
 
 
-def apply_update() -> dict[str, Any]:
-    """Download the latest verified release and install it over the current version."""
-    if running_as_appimage():
+def apply_appimage_bytes(image_bytes: bytes, *, target: Path) -> dict[str, Any]:
+    """
+    Replace the on-disk AppImage at ``target`` with ``image_bytes``.
+
+    Writes a sibling temp file then ``os.replace`` so the running process can
+    keep its mounted squashfs until relaunch.
+    """
+    parent = target.parent
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".new",
+        dir=str(parent),
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(image_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp_path.chmod(0o755)
+        os.replace(tmp_path, target)
+    except OSError as exc:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
         return {
             "status": "error",
-            "installable": False,
-            "error": (
-                "This AppImage cannot be updated in place. "
-                "Download the latest DeepCatalog-*-x86_64.AppImage from GitHub "
-                "Releases and replace this file."
-            ),
+            "error": f"Could not replace AppImage at {target}: {exc}",
         }
+    return {
+        "status": "success",
+        "updated_count": 1,
+        "updated": [str(target)],
+        "removed_count": 0,
+        "removed": [],
+        "appimage_path": str(target),
+    }
+
+
+def apply_update() -> dict[str, Any]:
+    """Download the latest verified release and install it over the current version."""
     info = check_for_update()
     if info.get("status") != "success":
         return info
@@ -628,13 +757,67 @@ def apply_update() -> dict[str, Any]:
             "status": "error",
             "error": f"Already up to date (v{info['current_version']}).",
         }
+    if not info.get("installable"):
+        return {
+            "status": "error",
+            "installable": False,
+            "error": info.get("verification_error")
+            or (
+                "This install cannot be updated in place. "
+                "Download the latest release from GitHub and replace this install."
+            ),
+        }
     if (
         not info.get("verifiable")
         or not info.get("signed")
         or not info.get("expected_sha256")
         or not info.get("download_url")
-        or not info.get("manifest_commit")
     ):
+        return {
+            "status": "error",
+            "error": info.get("verification_error")
+            or "Refusing to install an unsigned release (checksums are not authentic).",
+        }
+
+    kind = info.get("artifact_kind") or "tarball"
+    if kind == "appimage" or running_as_appimage():
+        target = appimage_update_target()
+        if target is None:
+            return {
+                "status": "error",
+                "installable": False,
+                "error": (
+                    "AppImage path is missing or not writable — cannot replace this file in place."
+                ),
+            }
+        try:
+            image_bytes = _download_bytes(info["download_url"])
+        except httpx.HTTPError as exc:
+            logger.warning("AppImage update download failed: %s", type(exc).__name__)
+            return {
+                "status": "error",
+                "error": "Download failed. Check your network and try again.",
+            }
+        try:
+            verify_sha256(image_bytes, info["expected_sha256"])
+        except ValueError:
+            logger.exception("AppImage SHA-256 verification failed")
+            return {"status": "error", "error": "Release verification failed (SHA-256 mismatch)"}
+        result = apply_appimage_bytes(image_bytes, target=target)
+        if result.get("status") != "success":
+            return result
+        return {
+            **result,
+            "installed_version": info.get("latest_version"),
+            "previous_version": info["current_version"],
+            "verified_sha256": info["expected_sha256"],
+            "verified_commit": info.get("manifest_commit"),
+            "artifact_name": info.get("artifact_name"),
+            "artifact_kind": "appimage",
+            "restart_required": True,
+        }
+
+    if not info.get("manifest_commit"):
         return {
             "status": "error",
             "error": info.get("verification_error")
@@ -665,6 +848,7 @@ def apply_update() -> dict[str, Any]:
         "verified_sha256": info["expected_sha256"],
         "verified_commit": info.get("manifest_commit"),
         "artifact_name": info.get("artifact_name"),
+        "artifact_kind": "tarball",
         "restart_required": True,
     }
 
@@ -673,10 +857,31 @@ def schedule_restart(delay_seconds: float = 0.75) -> dict[str, Any]:
     """
     Restart the server process in-place after a short delay.
 
-    Re-executes the original command line (works for `uvicorn …` console
-    scripts and `python -m uvicorn …` alike), so the response below can still
-    be delivered before the process is replaced.
+    AppImage builds re-exec the outer ``$APPIMAGE`` file so the new squashfs
+    is loaded. Source installs re-exec ``sys.executable`` with the original
+    argv (works for ``uvicorn …`` and ``python -m …``).
     """
+    if running_as_appimage():
+        image = appimage_update_target()
+        if image is None:
+            raw = os.getenv("APPIMAGE", "").strip()
+            image = Path(raw) if raw else None
+        if image is None or not image.is_file():
+            return {
+                "status": "error",
+                "error": "Cannot restart: AppImage path is missing after update.",
+            }
+        argv = [str(image), *sys.argv[1:]]
+
+        def _restart_appimage() -> None:
+            logger.info("Restarting AppImage: %s", " ".join(argv))
+            os.execv(str(image), argv)  # noqa: S606
+
+        timer = threading.Timer(delay_seconds, _restart_appimage)
+        timer.daemon = True
+        timer.start()
+        return {"status": "success", "message": "Restarting…", "command": argv}
+
     argv = [sys.executable, *sys.argv]
 
     def _restart() -> None:

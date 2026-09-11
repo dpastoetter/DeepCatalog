@@ -54,6 +54,12 @@ _KNOWN_DIMENSIONS = {
     "text-embedding-004": 768,
     "nomic-embed-text": 768,
     "nomic-embed-text:latest": 768,
+    "mxbai-embed-large": 1024,
+    "mxbai-embed-large:latest": 1024,
+    "bge-m3": 1024,
+    "bge-m3:latest": 1024,
+    "all-minilm": 384,
+    "all-minilm:latest": 384,
     ONNX_MODEL_NAME: ONNX_DIMENSION,
 }
 
