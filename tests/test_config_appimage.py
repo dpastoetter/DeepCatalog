@@ -42,8 +42,36 @@ def test_apprun_sets_webkit_and_adwaita_env():
     assert "XDG_CONFIG_DIRS" in text
     assert "export XDG_CONFIG_HOME=" not in text
     assert "/usr/bin/gsettings" in text
+    assert "env -u LD_LIBRARY_PATH" in text
+    # Color-scheme probe must run before WebKit LD_LIBRARY_PATH is exported.
+    probe_at = text.index("org.gnome.desktop.interface color-scheme")
+    ld_at = text.index('export LD_LIBRARY_PATH="${WEBKIT_DIR}')
+    assert probe_at < ld_at
     assert "/tmp/.dc/x86_64-linux-gnu/webkit2gtk-4.1" in text
     assert "ln -sfn" in text
+
+
+def test_apprun_gsettings_probe_uses_clean_ld_path(tmp_path):
+    """Host gsettings under WebKit LD_LIBRARY_PATH must not decide the theme."""
+    import os
+    import subprocess
+
+    script = tmp_path / "fake-gsettings"
+    script.write_text(
+        "#!/bin/sh\n"
+        'if [ -n "${LD_LIBRARY_PATH:-}" ]; then echo "\'default\'"; else echo "\'prefer-dark\'"; fi\n',
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    polluted_env = os.environ.copy()
+    polluted_env["LD_LIBRARY_PATH"] = "/tmp/webkit"
+    polluted = subprocess.check_output([str(script)], env=polluted_env, text=True).strip()
+    clean = subprocess.check_output(
+        ["env", "-u", "LD_LIBRARY_PATH", str(script)],
+        text=True,
+    ).strip()
+    assert polluted == "'default'"
+    assert clean == "'prefer-dark'"
 
 
 def test_relocate_webkit_rewrites_libexec_prefix(tmp_path):

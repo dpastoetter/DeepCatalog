@@ -325,18 +325,59 @@ def test_apply_gtk_wm_class_ignores_gtk_typelib_mismatch(monkeypatch):
     import sys
     from types import ModuleType
 
-    class BoomRepository:
-        def __getattr__(self, name: str):
-            raise AssertionError(f"refusing {name}")
+    class BoomGi:
+        @staticmethod
+        def require_version(_ns: str, _ver: str) -> None:
+            raise ValueError("Gtk 4 only")
 
     gi = ModuleType("gi")
-    repository = BoomRepository()
-    gi.repository = repository
+    gi.require_version = BoomGi.require_version
     monkeypatch.setitem(sys.modules, "gi", gi)
-    monkeypatch.setitem(sys.modules, "gi.repository", repository)
     from deepcatalog.desktop import _apply_gtk_wm_class
 
     _apply_gtk_wm_class()  # must not raise
+
+
+def test_apply_gtk_wm_class_sets_prefer_dark(monkeypatch):
+    props: dict[str, object] = {}
+
+    class FakeSettings:
+        def set_property(self, name: str, value: object) -> None:
+            props[name] = value
+
+    class FakeGtk:
+        class Settings:
+            @staticmethod
+            def get_default():
+                return FakeSettings()
+
+    class FakeGLib:
+        @staticmethod
+        def set_prgname(_name: str) -> None:
+            return None
+
+        @staticmethod
+        def set_application_name(_name: str) -> None:
+            return None
+
+    import sys
+    from types import ModuleType
+
+    gi = ModuleType("gi")
+    gi.require_version = lambda *_a, **_k: None
+    repository = ModuleType("gi.repository")
+    repository.GLib = FakeGLib
+    repository.Gtk = FakeGtk
+    gi.repository = repository
+    monkeypatch.setitem(sys.modules, "gi", gi)
+    monkeypatch.setitem(sys.modules, "gi.repository", repository)
+    monkeypatch.setenv("DEEPCATALOG_GTK_DARK", "1")
+    from deepcatalog.desktop import _apply_gtk_wm_class
+
+    _apply_gtk_wm_class()
+    assert props["gtk-theme-name"] == "Adwaita"
+    assert props["gtk-application-prefer-dark-theme"] is True
+    assert props["gtk-decoration-layout"] == ":minimize,maximize,close"
 
 
 def test_configure_webview_runtime_env_sets_webkit_defaults(monkeypatch):

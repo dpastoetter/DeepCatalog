@@ -17,6 +17,44 @@ export PYTHONPATH="${DEEPCATALOG_PROJECT_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
 # Official Ollama installs to ~/.local/bin; .desktop launches often omit it.
 export PATH="$HERE/usr/bin:${HOME:+$HOME/.local/bin:}${PATH:-}"
 
+# Probe GNOME color-scheme *before* WebKit LD_LIBRARY_PATH. Host gsettings
+# under the Ubuntu WebKit libs often returns a false 'default' instead of
+# prefer-dark, which forced light CSD on Debian/Fedora dark sessions.
+if [ -z "${DEEPCATALOG_GTK_DARK:-}" ]; then
+  scheme=""
+  gtk_th=""
+  gsettings_bin=""
+  if [ -x /usr/bin/gsettings ]; then
+    gsettings_bin=/usr/bin/gsettings
+  elif command -v gsettings >/dev/null 2>&1; then
+    gsettings_bin="$(command -v gsettings)"
+  fi
+  if [ -n "$gsettings_bin" ]; then
+    # Strip any inherited AppImage lib path from a nested relaunch.
+    scheme=$(env -u LD_LIBRARY_PATH -u GIO_MODULE_DIR -u GSETTINGS_SCHEMA_DIR \
+      "$gsettings_bin" get org.gnome.desktop.interface color-scheme 2>/dev/null || true)
+    gtk_th=$(env -u LD_LIBRARY_PATH -u GIO_MODULE_DIR -u GSETTINGS_SCHEMA_DIR \
+      "$gsettings_bin" get org.gnome.desktop.interface gtk-theme 2>/dev/null || true)
+  fi
+  case "$scheme" in
+    *prefer-dark*) export DEEPCATALOG_GTK_DARK=1 ;;
+    *prefer-light*) export DEEPCATALOG_GTK_DARK=0 ;;
+    *)
+      case "$gtk_th" in
+        *[Dd]ark*) export DEEPCATALOG_GTK_DARK=1 ;;
+        *) export DEEPCATALOG_GTK_DARK=0 ;;
+      esac
+      ;;
+  esac
+fi
+if [ "${DEEPCATALOG_GTK_DARK:-0}" = "1" ]; then
+  # Adwaita:dark is required for CSD; prefer-dark alone is ignored when
+  # GTK_THEME=Adwaita (light) is set.
+  export GTK_THEME="${GTK_THEME:-Adwaita:dark}"
+else
+  export GTK_THEME="${GTK_THEME:-Adwaita}"
+fi
+
 WEBKIT_DIR="$HERE/usr/lib/deepcatalog-webkit"
 if [ -d "$WEBKIT_DIR" ]; then
   export LD_LIBRARY_PATH="${WEBKIT_DIR}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -49,40 +87,6 @@ export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS="${WEBKIT_DISABLE_SANDBOX_THIS_I
 # Bundled WebKit on Fedora/NVIDIA/Wayland often paints a black view otherwise.
 export WEBKIT_DISABLE_COMPOSITING_MODE="${WEBKIT_DISABLE_COMPOSITING_MODE:-1}"
 export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"
-
-# Capture the session color-scheme before isolating GSettings (memory backend
-# would hide dconf, and a light Adwaita CSD on a dark desktop looks wrong).
-if [ -z "${DEEPCATALOG_GTK_DARK:-}" ]; then
-  scheme=""
-  gtk_th=""
-  gsettings_bin=""
-  if [ -x /usr/bin/gsettings ]; then
-    gsettings_bin=/usr/bin/gsettings
-  elif command -v gsettings >/dev/null 2>&1; then
-    gsettings_bin="$(command -v gsettings)"
-  fi
-  if [ -n "$gsettings_bin" ]; then
-    scheme=$("$gsettings_bin" get org.gnome.desktop.interface color-scheme 2>/dev/null || true)
-    gtk_th=$("$gsettings_bin" get org.gnome.desktop.interface gtk-theme 2>/dev/null || true)
-  fi
-  case "$scheme" in
-    *prefer-dark*) export DEEPCATALOG_GTK_DARK=1 ;;
-    *prefer-light*) export DEEPCATALOG_GTK_DARK=0 ;;
-    *)
-      case "$gtk_th" in
-        *[Dd]ark*) export DEEPCATALOG_GTK_DARK=1 ;;
-        *) export DEEPCATALOG_GTK_DARK=0 ;;
-      esac
-      ;;
-  esac
-fi
-if [ "${DEEPCATALOG_GTK_DARK:-0}" = "1" ]; then
-  # Adwaita:dark is required for CSD; prefer-dark alone is ignored when
-  # GTK_THEME=Adwaita (light) is set.
-  export GTK_THEME="${GTK_THEME:-Adwaita:dark}"
-else
-  export GTK_THEME="${GTK_THEME:-Adwaita}"
-fi
 
 # Do not replace XDG_CONFIG_HOME — that hid portals/user-dirs and aborted
 # launch on Debian when combined with an early Gtk 4 GI bind.

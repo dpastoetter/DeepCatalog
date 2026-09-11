@@ -759,15 +759,16 @@ def desktop_prefers_dark() -> bool:
 
 
 def _apply_gtk_wm_class() -> None:
-    """Set WM_CLASS before Gtk.Application starts.
+    """Set WM_CLASS and reinforce Adwaita dark CSD after Gtk 3 is pinned.
 
-    Optional host GI (PyGObject). Do not import Gtk here — without
-    ``gi.require_version`` PyGObject may bind Gtk 4 from the host typelib
-    while AppImage WebKit needs Gtk 3, which aborts startup on Debian.
-    Dark CSD is handled by AppRun (``GTK_THEME=Adwaita:dark``).
+    Must call ``gi.require_version('Gtk', '3.0')`` before importing Gtk —
+    a bare import can bind host Gtk 4 and abort AppImage startup on Debian.
     """
     try:
-        from gi.repository import GLib
+        import gi
+
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import GLib, Gtk
     except Exception:  # noqa: BLE001 — GI missing or typelib mismatch
         return
     try:
@@ -775,6 +776,18 @@ def _apply_gtk_wm_class() -> None:
         GLib.set_application_name("DeepCatalog Studio")
     except Exception as exc:  # noqa: BLE001 — GI bindings vary by distro
         logger.debug("Could not set GTK application id: %s", exc)
+    try:
+        settings = Gtk.Settings.get_default()
+        if settings is None:
+            return
+        dark = desktop_prefers_dark()
+        # Property value is the theme family name; variant comes from prefer-dark
+        # and/or GTK_THEME=Adwaita:dark set by AppRun.
+        settings.set_property("gtk-theme-name", "Adwaita")
+        settings.set_property("gtk-application-prefer-dark-theme", dark)
+        settings.set_property("gtk-decoration-layout", ":minimize,maximize,close")
+    except Exception as exc:  # noqa: BLE001 — GI bindings vary by distro
+        logger.debug("Could not apply GTK dark preference: %s", exc)
 
 
 def _apply_window_icon(window: object, icon: Path | None) -> None:
