@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from deepcatalog.tools import metadata_db, rag_index
 
 
@@ -184,6 +186,21 @@ def test_document_reveal_mocked(client, isolated_data, monkeypatch):
     resp = client.post(f"/api/documents/{doc_id}/reveal")
     assert resp.status_code == 200
     assert resp.json()["status"] == "success"
+
+
+def test_document_open_mocked(client, isolated_data, monkeypatch):
+    doc_id, archive = _seed_document(isolated_data, monkeypatch)
+    opened: list[str] = []
+
+    def fake_open(path: str):
+        opened.append(path)
+        return {"status": "success", "path": path, "opened": "os"}
+
+    monkeypatch.setattr("app.routers.documents.open_with_os", fake_open)
+    resp = client.post(f"/api/documents/{doc_id}/open")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "success"
+    assert opened and Path(opened[0]).name == Path(archive).name
 
 
 def test_retrieve_and_ask(client, isolated_data, monkeypatch):

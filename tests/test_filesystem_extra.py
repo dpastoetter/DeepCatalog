@@ -39,24 +39,62 @@ def test_reveal_in_explorer_missing(isolated_data):
 def test_reveal_in_explorer_linux(isolated_data, monkeypatch):
     target = isolated_data / "show.pdf"
     target.write_bytes(b"%PDF")
-    launched: list[list[str]] = []
+    launched: list[tuple[list[str], dict]] = []
 
     monkeypatch.setattr(filesystem.platform, "system", lambda: "Linux")
     monkeypatch.setattr(
+        filesystem,
+        "host_subprocess_env",
+        lambda: {
+            "PATH": "/usr/bin",
+            "HOME": str(isolated_data),
+            # Ensure polluted AppImage libs are not required for the spawn.
+        },
+    )
+    monkeypatch.setattr(
         filesystem.shutil,
         "which",
-        lambda name: "/usr/bin/xdg-open" if name == "xdg-open" else None,
+        lambda name, path=None: "/usr/bin/xdg-open" if name == "xdg-open" else None,
     )
 
-    def fake_popen(cmd, **_kw):
-        launched.append(list(cmd))
+    def fake_popen(cmd, **kw):
+        launched.append((list(cmd), kw))
         return None
 
     monkeypatch.setattr(filesystem.subprocess, "Popen", fake_popen)
     result = filesystem.reveal_in_explorer(str(target))
     assert result["status"] == "success"
     assert launched
-    assert launched[0][0] == "/usr/bin/xdg-open"
+    assert launched[0][0] == ["/usr/bin/xdg-open", str(target.parent)]
+    assert "LD_LIBRARY_PATH" not in (launched[0][1].get("env") or {})
+
+
+def test_open_with_os_linux(isolated_data, monkeypatch):
+    target = isolated_data / "open-me.pdf"
+    target.write_bytes(b"%PDF-1.4")
+    launched: list[tuple[list[str], dict]] = []
+
+    monkeypatch.setattr(filesystem.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        filesystem,
+        "host_subprocess_env",
+        lambda: {"PATH": "/usr/bin", "HOME": str(isolated_data)},
+    )
+    monkeypatch.setattr(
+        filesystem.shutil,
+        "which",
+        lambda name, path=None: "/usr/bin/xdg-open" if name == "xdg-open" else None,
+    )
+
+    def fake_popen(cmd, **kw):
+        launched.append((list(cmd), kw))
+        return None
+
+    monkeypatch.setattr(filesystem.subprocess, "Popen", fake_popen)
+    result = filesystem.open_with_os(str(target))
+    assert result["status"] == "success"
+    assert launched[0][0] == ["/usr/bin/xdg-open", str(target)]
+    assert launched[0][1].get("env", {}).get("PATH") == "/usr/bin"
 
 
 def test_reveal_in_explorer_darwin(isolated_data, monkeypatch):
@@ -65,6 +103,11 @@ def test_reveal_in_explorer_darwin(isolated_data, monkeypatch):
     launched: list[list[str]] = []
 
     monkeypatch.setattr(filesystem.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        filesystem,
+        "host_subprocess_env",
+        lambda: {"PATH": "/usr/bin", "HOME": str(isolated_data)},
+    )
 
     def fake_popen(cmd, **_kw):
         launched.append(list(cmd))

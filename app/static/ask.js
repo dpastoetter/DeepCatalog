@@ -352,9 +352,30 @@ export async function fetchDocumentBlob(url) {
   };
 }
 
+/** Map a document/review file URL to the OS-open API endpoint. */
+export function documentOsOpenUrl(fileUrl) {
+  if (typeof fileUrl !== "string") return null;
+  const doc = fileUrl.match(/^\/api\/documents\/([^/?#]+)\/file\/?$/);
+  if (doc) {
+    return `/api/documents/${encodeURIComponent(decodeURIComponent(doc[1]))}/open`;
+  }
+  const review = fileUrl.match(/^\/api\/reviews\/([^/?#]+)\/file\/?$/);
+  if (review) {
+    return `/api/reviews/${encodeURIComponent(decodeURIComponent(review[1]))}/open`;
+  }
+  return null;
+}
+
 export async function openDocumentFile(url) {
   if (window.DC_MOCK?.enabled) {
     throw new Error("Mockup mode is on — files are demo data. Turn it off in Settings.");
+  }
+  // Prefer the OS handler: AppImage WebKit often blocks blob popups / secondary
+  // windows, and host PDF viewers need a clean (non-WebKit) process env.
+  const osUrl = documentOsOpenUrl(url);
+  if (osUrl) {
+    await api(osUrl, { method: "POST" });
+    return;
   }
   const win = window.open("about:blank", "_blank");
   if (!win) {

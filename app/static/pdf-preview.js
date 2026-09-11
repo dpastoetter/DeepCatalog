@@ -17,12 +17,15 @@ export function mountPdfPreview(container, source, options = {}) {
   const scrollClass = options.scrollClass || "pdf-preview-scroll";
   const pageClass = options.pageClass || "pdf-preview-page";
 
-  const docInit =
-    source instanceof ArrayBuffer
-      ? { data: source }
-      : source instanceof Uint8Array
-        ? { data: source }
-        : { url: source };
+  // Copy bytes — PDF.js may transfer/detach the caller's ArrayBuffer.
+  let docInit;
+  if (source instanceof ArrayBuffer) {
+    docInit = { data: source.slice(0) };
+  } else if (source instanceof Uint8Array) {
+    docInit = { data: source.slice(0) };
+  } else {
+    docInit = { url: source };
+  }
 
   let cancelled = false;
   let debounceTimer = 0;
@@ -30,6 +33,8 @@ export function mountPdfPreview(container, source, options = {}) {
   /** @type {import("./vendor/pdfjs/pdf.mjs").PDFDocumentProxy | null} */
   let pdfDoc = null;
   let renderGeneration = 0;
+  let lastRenderWidth = 0;
+  let rendering = false;
 
   const scroll = document.createElement("div");
   scroll.className = scrollClass;
@@ -45,12 +50,19 @@ export function mountPdfPreview(container, source, options = {}) {
   };
 
   const render = async () => {
-    const generation = ++renderGeneration;
-    const width = container.clientWidth;
+    const width = Math.floor(container.clientWidth);
     if (width < 48) return;
+    // WebKit fires ResizeObserver when page canvases change height; ignore
+    // height-only churn so we do not clear/redraw in a flicker loop.
+    if (pdfDoc && width === lastRenderWidth) return;
 
-    scroll.replaceChildren();
-    scroll.innerHTML = `<div class="pdf-preview-loading">Loading preview…</div>`;
+    const generation = ++renderGeneration;
+    rendering = true;
+
+    const hadPages = Boolean(scroll.querySelector("canvas"));
+    if (!hadPages) {
+      scroll.innerHTML = `<div class="pdf-preview-loading">Loading preview…</div>`;
+    }
 
     try {
       if (!pdfDoc) {
@@ -59,8 +71,8 @@ export function mountPdfPreview(container, source, options = {}) {
       }
       if (cancelled || generation !== renderGeneration) return;
 
-      scroll.replaceChildren();
       const pageCount = pdfDoc.numPages;
+      const next = document.createDocumentFragment();
 
       for (let pageNum = 1; pageNum <= pageCount; pageNum += 1) {
         if (cancelled || generation !== renderGeneration) return;
@@ -79,30 +91,47 @@ export function mountPdfPreview(container, source, options = {}) {
           pageCount > 1 ? `Page ${pageNum} of ${pageCount}` : "Document page",
         );
 
-        const ctx = canvas.getContext("2d");
+        const ctx = canvas.getContext("2d", { alpha: false });
         if (!ctx) throw new Error("Canvas is not available");
 
         await page.render({ canvasContext: ctx, viewport }).promise;
         if (cancelled || generation !== renderGeneration) return;
-        scroll.appendChild(canvas);
+        next.appendChild(canvas);
       }
+
+      if (cancelled || generation !== renderGeneration) return;
+      scroll.replaceChildren(next);
+      lastRenderWidth = width;
     } catch (err) {
       if (cancelled || generation !== renderGeneration) return;
       showError(err);
+    } finally {
+      if (generation === renderGeneration) {
+        rendering = false;
+      }
     }
   };
 
   const schedule = () => {
+    if (cancelled) return;
     window.clearTimeout(debounceTimer);
     debounceTimer = window.setTimeout(() => {
+      const width = Math.floor(container.clientWidth);
+      if (width < 48) return;
+      if (pdfDoc && width === lastRenderWidth) return;
+      if (rendering && width === lastRenderWidth) return;
       render().catch((err) => {
         if (!cancelled) showError(err);
       });
-    }, 80);
+    }, 120);
   };
 
   if (typeof ResizeObserver !== "undefined") {
-    resizeObserver = new ResizeObserver(schedule);
+    resizeObserver = new ResizeObserver(() => {
+      // Ignore observations caused by our own canvas swaps while rendering.
+      if (rendering) return;
+      schedule();
+    });
     resizeObserver.observe(container);
   }
   schedule();

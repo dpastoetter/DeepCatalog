@@ -15,6 +15,7 @@ from pypdf import PdfReader
 
 from deepcatalog.config import ensure_data_dirs
 from deepcatalog.media_validate import MediaValidationError, validate_scan_file
+from deepcatalog.ollama_setup import host_subprocess_env
 from deepcatalog.settings import get_folder_for_category, get_source_dir
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp"}
@@ -148,11 +149,16 @@ def reveal_in_explorer(path: str) -> dict[str, Any]:
 
     On Linux this prefers selecting the file in Nautilus/Dolphin when available,
     otherwise opens the parent folder with xdg-open.
+
+    Host tools are launched with ``host_subprocess_env`` so AppImage WebKit
+    libraries on ``LD_LIBRARY_PATH`` do not break Nautilus/xdg-open.
     """
     file_path = Path(path).expanduser().resolve()
     if not file_path.exists():
         return {"status": "error", "error": f"file not found: {path}"}
 
+    env = host_subprocess_env()
+    which_path = env.get("PATH")
     system = platform.system()
     try:
         if system == "Darwin":
@@ -161,6 +167,7 @@ def reveal_in_explorer(path: str) -> dict[str, Any]:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
+                env=env,
             )
         elif system == "Windows":
             subprocess.Popen(  # noqa: S603
@@ -168,6 +175,7 @@ def reveal_in_explorer(path: str) -> dict[str, Any]:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
+                env=env,
             )
         else:
             # Linux / FreeDesktop
@@ -179,7 +187,7 @@ def reveal_in_explorer(path: str) -> dict[str, Any]:
                 ["nemo", str(file_path)],
                 ["xdg-open", parent],
             ):
-                exe = shutil.which(cmd[0])
+                exe = shutil.which(cmd[0], path=which_path)
                 if not exe:
                     continue
                 subprocess.Popen(  # noqa: S603
@@ -187,7 +195,7 @@ def reveal_in_explorer(path: str) -> dict[str, Any]:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     start_new_session=True,
-                    env=os.environ.copy(),
+                    env=env,
                 )
                 launched = True
                 break
@@ -203,6 +211,52 @@ def reveal_in_explorer(path: str) -> dict[str, Any]:
         "status": "success",
         "path": str(file_path),
         "opened": "explorer",
+    }
+
+
+def open_with_os(path: str) -> dict[str, Any]:
+    """
+    Open a local file with the desktop default application (xdg-open / open).
+
+    Uses ``host_subprocess_env`` so AppImage-bundled WebKit libs do not break
+    the host PDF viewer or image app.
+    """
+    file_path = Path(path).expanduser().resolve()
+    if not file_path.exists() or not file_path.is_file():
+        return {"status": "error", "error": f"file not found: {path}"}
+
+    env = host_subprocess_env()
+    which_path = env.get("PATH")
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            subprocess.Popen(  # noqa: S603
+                ["open", str(file_path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                env=env,
+            )
+        elif system == "Windows":
+            os.startfile(str(file_path))  # type: ignore[attr-defined]
+        else:
+            exe = shutil.which("xdg-open", path=which_path)
+            if not exe:
+                return {"status": "error", "error": "xdg-open is not available"}
+            subprocess.Popen(  # noqa: S603
+                [exe, str(file_path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                env=env,
+            )
+    except OSError:
+        return {"status": "error", "error": "could not open the file"}
+
+    return {
+        "status": "success",
+        "path": str(file_path),
+        "opened": "os",
     }
 
 

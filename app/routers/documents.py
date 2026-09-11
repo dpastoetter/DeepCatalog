@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse
 from app.deps import archive_roots, is_within
 from app.schemas import AskRequest
 from deepcatalog.runner import run_query
-from deepcatalog.tools.filesystem import reveal_in_explorer
+from deepcatalog.tools.filesystem import open_with_os, reveal_in_explorer
 from deepcatalog.tools.metadata_db import get_document, search_metadata
 from deepcatalog.tools.rag_index import retrieve_chunks
 
@@ -22,6 +22,30 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["documents"])
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _archived_document_path(document_id: str) -> Path:
+    """Resolve a document id to a file under the configured archive roots."""
+    result = get_document(document_id)
+    if result.get("status") != "success":
+        raise HTTPException(status_code=404, detail=result.get("error", "not found"))
+    document = result.get("document") or {}
+    path_value = document.get("path")
+    if not path_value:
+        raise HTTPException(status_code=404, detail="document has no path")
+    path = Path(path_value).expanduser().resolve()
+    if not any(is_within(path, root) for root in archive_roots()):
+        raise HTTPException(status_code=403, detail="file is outside the archive")
+    if not path.exists() or not path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "File is missing on disk. It may have been deleted or filed to a "
+                "temporary path. Re-process the scan, or use Remove all stored data "
+                "and ingest again."
+            ),
+        )
+    return path
 
 
 def _optional_doc_date(value: str | None, field: str) -> str | None:
@@ -67,16 +91,27 @@ def api_document(document_id: str) -> dict[str, Any]:
 @router.post("/api/documents/{document_id}/reveal")
 def api_reveal_document(document_id: str) -> dict[str, Any]:
     """Reveal an archived document in the system file manager."""
-    result = get_document(document_id)
-    if result.get("status") != "success":
-        raise HTTPException(status_code=404, detail=result.get("error", "not found"))
-    path = (result.get("document") or {}).get("path")
-    if not path:
-        raise HTTPException(status_code=404, detail="document has no path")
-    revealed = reveal_in_explorer(path)
+    path = _archived_document_path(document_id)
+    revealed = reveal_in_explorer(str(path))
     if revealed.get("status") != "success":
-        raise HTTPException(status_code=500, detail="could not open the file manager")
+        raise HTTPException(
+            status_code=500,
+            detail=revealed.get("error") or "could not open the file manager",
+        )
     return revealed
+
+
+@router.post("/api/documents/{document_id}/open")
+def api_open_document(document_id: str) -> dict[str, Any]:
+    """Open an archived document with the OS default application."""
+    path = _archived_document_path(document_id)
+    opened = open_with_os(str(path))
+    if opened.get("status") != "success":
+        raise HTTPException(
+            status_code=500,
+            detail=opened.get("error") or "could not open the file",
+        )
+    return opened
 
 
 @router.get("/api/documents/{document_id}/file")
@@ -87,21 +122,7 @@ def api_document_file(document_id: str) -> FileResponse:
     if result.get("status") != "success":
         raise HTTPException(status_code=404, detail=result.get("error", "not found"))
     document = result.get("document") or {}
-    path_value = document.get("path")
-    if not path_value:
-        raise HTTPException(status_code=404, detail="document has no path")
-    path = Path(path_value).expanduser().resolve()
-    if not any(is_within(path, root) for root in archive_roots()):
-        raise HTTPException(status_code=403, detail="file is outside the archive")
-    if not path.exists() or not path.is_file():
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                "File is missing on disk. It may have been deleted or filed to a "
-                "temporary path. Re-process the scan, or use Remove all stored data "
-                "and ingest again."
-            ),
-        )
+    path = _archived_document_path(document_id)
     guessed, _ = mimetypes.guess_type(str(path))
     suffix = path.suffix.lower()
     if suffix == ".pdf":

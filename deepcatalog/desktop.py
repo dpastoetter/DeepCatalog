@@ -29,6 +29,7 @@ from deepcatalog.local_security import (
     ssl_cert_paths,
     sync_configured_bind,
 )
+from deepcatalog.ollama_setup import host_subprocess_env
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_WIDTH = 1280
@@ -708,7 +709,7 @@ def open_chromium_app_window(
         return None
     profile = chromium_profile_dir(data_dir)
     argv = chromium_app_argv(browser, url, profile, width=width, height=height)
-    env = os.environ.copy()
+    env = host_subprocess_env()
     env["CHROME_DESKTOP"] = DESKTOP_FILE_NAME
     logger.info("Opening app window with %s", browser)
     try:
@@ -735,13 +736,16 @@ def open_chromium_app_window(
 
 
 def _open_in_browser(url: str) -> None:
-    opener = shutil.which("xdg-open") or shutil.which("gio")
+    env = host_subprocess_env()
+    which_path = env.get("PATH")
+    opener = shutil.which("xdg-open", path=which_path) or shutil.which("gio", path=which_path)
     if opener:
         subprocess.Popen(  # noqa: S603
             [opener, url] if opener.endswith("xdg-open") else [opener, "open", url],
             start_new_session=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=env,
         )
         return
     webbrowser.open(url)

@@ -50,6 +50,13 @@ describe("Ask helpers", () => {
     );
   });
 
+  it("maps file URLs to OS-open endpoints", async () => {
+    const { documentOsOpenUrl } = await import("../../app/static/ask.js");
+    expect(documentOsOpenUrl("/api/documents/abc/file")).toBe("/api/documents/abc/open");
+    expect(documentOsOpenUrl("/api/reviews/r1/file")).toBe("/api/reviews/r1/open");
+    expect(documentOsOpenUrl("/api/other")).toBe(null);
+  });
+
   it("builds bounded history from completed turns", () => {
     const turns = [
       { id: "1", question: "Q1", reply: "A1", status: "success" },
