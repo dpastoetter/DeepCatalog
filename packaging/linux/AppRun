@@ -77,27 +77,15 @@ if [ -z "${DEEPCATALOG_GTK_DARK:-}" ]; then
   esac
 fi
 if [ "${DEEPCATALOG_GTK_DARK:-0}" = "1" ]; then
+  # Adwaita:dark is required for CSD; prefer-dark alone is ignored when
+  # GTK_THEME=Adwaita (light) is set.
   export GTK_THEME="${GTK_THEME:-Adwaita:dark}"
-  gtk_prefer_dark=true
 else
   export GTK_THEME="${GTK_THEME:-Adwaita}"
-  gtk_prefer_dark=false
 fi
 
-# Private GTK config so host ~/.config/gtk-3.0 cannot force a light theme over
-# Adwaita:dark, and prefer-dark matches the probed GNOME color-scheme.
-gtk_conf="${XDG_CACHE_HOME:-$HOME/.cache}/deepcatalog/gtk-config"
-mkdir -p "$gtk_conf/gtk-3.0"
-cat > "$gtk_conf/gtk-3.0/settings.ini" <<EOF
-[Settings]
-gtk-theme-name=Adwaita
-gtk-icon-theme-name=Adwaita
-gtk-cursor-theme-name=Adwaita
-gtk-font-name=Sans 11
-gtk-decoration-layout=:minimize,maximize,close
-gtk-application-prefer-dark-theme=${gtk_prefer_dark}
-EOF
-export XDG_CONFIG_HOME="$gtk_conf"
+# Do not replace XDG_CONFIG_HOME — that hid portals/user-dirs and aborted
+# launch on Debian when combined with an early Gtk 4 GI bind.
 
 # Bundled GTK must use the Ubuntu Adwaita copied at pack time — host GTK CSS
 # (Fedora 42+) is newer than the builder's GTK 3.24 and leaves CSD buttons blank.

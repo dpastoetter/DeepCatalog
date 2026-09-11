@@ -40,8 +40,7 @@ def test_apprun_sets_webkit_and_adwaita_env():
     assert "usr/bin/gdk-pixbuf-query-loaders" in text
     assert "command -v gdk-pixbuf-query-loaders" not in text
     assert "XDG_CONFIG_DIRS" in text
-    assert "XDG_CONFIG_HOME" in text
-    assert "gtk-application-prefer-dark-theme" in text
+    assert "export XDG_CONFIG_HOME=" not in text
     assert "/usr/bin/gsettings" in text
     assert "/tmp/.dc/x86_64-linux-gnu/webkit2gtk-4.1" in text
     assert "ln -sfn" in text

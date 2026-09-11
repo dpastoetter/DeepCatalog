@@ -759,33 +759,22 @@ def desktop_prefers_dark() -> bool:
 
 
 def _apply_gtk_wm_class() -> None:
-    """Set WM_CLASS and Adwaita dark preference before Gtk.Application starts.
+    """Set WM_CLASS before Gtk.Application starts.
 
-    Optional host GI (PyGObject); not bundled in the AppImage Python.
-    AppRun already sets GTK_THEME / private settings.ini; this reinforces
-    prefer-dark on Gtk.Settings when GSETTINGS_BACKEND=memory hides dconf.
+    Optional host GI (PyGObject). Do not import Gtk here — without
+    ``gi.require_version`` PyGObject may bind Gtk 4 from the host typelib
+    while AppImage WebKit needs Gtk 3, which aborts startup on Debian.
+    Dark CSD is handled by AppRun (``GTK_THEME=Adwaita:dark``).
     """
     try:
-        from gi.repository import GLib, Gtk
-    except ImportError:
+        from gi.repository import GLib
+    except Exception:  # noqa: BLE001 — GI missing or typelib mismatch
         return
     try:
         GLib.set_prgname(WM_CLASS)
         GLib.set_application_name("DeepCatalog Studio")
     except Exception as exc:  # noqa: BLE001 — GI bindings vary by distro
         logger.debug("Could not set GTK application id: %s", exc)
-    try:
-        settings = Gtk.Settings.get_default()
-        if settings is None:
-            return
-        dark = desktop_prefers_dark()
-        # Prefer the :dark variant explicitly — GTK_THEME=Adwaita alone ignores
-        # gtk-application-prefer-dark-theme for CSD chrome.
-        settings.set_property("gtk-theme-name", "Adwaita:dark" if dark else "Adwaita")
-        settings.set_property("gtk-application-prefer-dark-theme", dark)
-        settings.set_property("gtk-decoration-layout", ":minimize,maximize,close")
-    except Exception as exc:  # noqa: BLE001 — GI bindings vary by distro
-        logger.debug("Could not apply GTK dark preference: %s", exc)
 
 
 def _apply_window_icon(window: object, icon: Path | None) -> None:
@@ -814,9 +803,10 @@ def _try_native_window(
     except ImportError as exc:
         logger.warning("pywebview is not available (%s)", exc)
         return False
-    _apply_gtk_wm_class()
     icon = window_icon_path()
     try:
+        # After webview import (which pins Gtk 3); never import Gtk ourselves first.
+        _apply_gtk_wm_class()
         try:
             webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
             webview.settings["ALLOW_DOWNLOADS"] = True
