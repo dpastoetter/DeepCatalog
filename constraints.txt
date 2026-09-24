@@ -28,7 +28,7 @@ anyio==4.15.1
     #   openai
     #   starlette
     #   watchfiles
-ast-serialize==0.11.1
+ast-serialize==0.11.2
     # via mypy
 attrs==26.1.0
     # via
@@ -65,7 +65,7 @@ click==8.5.0
     #   huggingface-hub
     #   pip-tools
     #   uvicorn
-coverage==7.16.0
+coverage==7.16.1
     # via pytest-cov
 cryptography==50.0.1
     # via
@@ -81,7 +81,7 @@ fastapi==0.141.1
     # via
     #   deepcatalog (pyproject.toml)
     #   google-adk
-filelock==3.32.6
+filelock==4.0.1
     # via huggingface-hub
 flatbuffers==25.12.19
     # via onnxruntime
@@ -89,15 +89,15 @@ frozenlist==1.8.0
     # via
     #   aiohttp
     #   aiosignal
-fsspec==2026.7.0
+fsspec==2026.9.0
     # via huggingface-hub
-google-adk==2.8.0
+google-adk==2.9.2
     # via deepcatalog (pyproject.toml)
 google-auth==2.58.0
     # via
     #   google-adk
     #   google-genai
-google-genai==2.22.0
+google-genai==2.24.0
     # via
     #   deepcatalog (pyproject.toml)
     #   google-adk
@@ -105,7 +105,7 @@ googleapis-common-protos==1.75.3
     # via opentelemetry-exporter-otlp-proto-grpc
 graphviz==0.21
     # via google-adk
-grpcio==1.83.1
+grpcio==1.84.0
     # via
     #   chromadb
     #   opentelemetry-exporter-otlp-proto-grpc
@@ -120,7 +120,7 @@ httpcore==1.0.9
     # via
     #   deepcatalog (pyproject.toml)
     #   httpx
-httpcore2==2.12.0
+httpcore2==2.13.0
     # via httpx2
 httptools==0.8.0
     # via uvicorn
@@ -131,11 +131,11 @@ httpx==0.28.1
     #   google-adk
     #   google-genai
     #   huggingface-hub
-httpx2==2.12.0
+httpx2==2.13.0
     # via openai
-huggingface-hub==1.31.0
+huggingface-hub==1.32.0
     # via tokenizers
-idna==3.19
+idna==3.20
     # via
     #   anyio
     #   httpx
@@ -146,7 +146,7 @@ importlib-resources==7.1.0
     # via chromadb
 iniconfig==2.3.0
     # via pytest
-jiter==0.16.0
+jiter==0.17.0
     # via openai
 joserfc==1.7.5
     # via authlib
@@ -166,7 +166,7 @@ mdurl==0.1.2
     # via markdown-it-py
 mmh3==5.3.0
     # via chromadb
-multidict==6.8.0
+multidict==6.9.1
     # via
     #   aiohttp
     #   yarl
@@ -182,29 +182,29 @@ oauthlib==3.3.1
     # via requests-oauthlib
 onnxruntime==1.30.0
     # via chromadb
-openai==3.12.0
+openai==3.16.2
     # via deepcatalog (pyproject.toml)
-opentelemetry-api==1.42.1
+opentelemetry-api==1.44.0
     # via
     #   chromadb
     #   google-adk
     #   opentelemetry-exporter-otlp-proto-grpc
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions
-opentelemetry-exporter-otlp-proto-common==1.42.1
+opentelemetry-exporter-otlp-proto-common==1.44.0
     # via opentelemetry-exporter-otlp-proto-grpc
-opentelemetry-exporter-otlp-proto-grpc==1.42.1
+opentelemetry-exporter-otlp-proto-grpc==1.44.0
     # via chromadb
-opentelemetry-proto==1.42.1
+opentelemetry-proto==1.44.0
     # via
     #   opentelemetry-exporter-otlp-proto-common
     #   opentelemetry-exporter-otlp-proto-grpc
-opentelemetry-sdk==1.42.1
+opentelemetry-sdk==1.44.0
     # via
     #   chromadb
     #   google-adk
     #   opentelemetry-exporter-otlp-proto-grpc
-opentelemetry-semantic-conventions==0.63b1
+opentelemetry-semantic-conventions==0.65b0
     # via opentelemetry-sdk
 orjson==3.12.0
     # via chromadb
@@ -232,11 +232,11 @@ pluggy==1.6.0
     # via
     #   pytest
     #   pytest-cov
-propcache==0.5.2
+propcache==0.5.4
     # via
     #   aiohttp
     #   yarl
-protobuf==6.33.6
+protobuf==7.36.2
     # via
     #   googleapis-common-protos
     #   onnxruntime
@@ -259,7 +259,7 @@ pydantic==2.13.5
     #   google-genai
     #   openai
     #   pydantic-settings
-pydantic-core==2.46.5
+pydantic-core==2.49.0
     # via pydantic
 pydantic-settings==2.15.0
     # via chromadb
@@ -267,11 +267,11 @@ pygments==2.21.0
     # via
     #   pytest
     #   rich
-pypdf==6.18.0
+pypdf==6.19.0
     # via deepcatalog (pyproject.toml)
 pypika==0.51.1
     # via chromadb
-pyproject-hooks==1.2.0
+pyproject-hooks==1.3.3
     # via
     #   build
     #   pip-tools
@@ -323,7 +323,7 @@ rpds-py==2026.6.3
     # via
     #   jsonschema
     #   referencing
-ruff==0.16.7
+ruff==0.16.8
     # via deepcatalog (pyproject.toml)
 shellingham==1.5.4
     # via typer
@@ -346,7 +346,7 @@ tenacity==9.1.4
     #   google-genai
 tokenizers==0.23.2
     # via chromadb
-tqdm==4.70.0
+tqdm==4.70.1
     # via
     #   chromadb
     #   huggingface-hub
@@ -384,11 +384,11 @@ typing-inspection==0.4.4
     #   pydantic-settings
 tzlocal==5.4.4
     # via google-adk
-urllib3==2.7.0
+urllib3==2.8.0
     # via
     #   kubernetes
     #   requests
-uvicorn==0.52.4
+uvicorn==0.53.0
     # via
     #   chromadb
     #   deepcatalog (pyproject.toml)
@@ -399,18 +399,18 @@ watchdog==6.0.0
     # via
     #   deepcatalog (pyproject.toml)
     #   google-adk
-watchfiles==1.2.0
+watchfiles==1.3.0
     # via uvicorn
 websocket-client==1.9.2
     # via kubernetes
-websockets==15.0.1
+websockets==16.1.1
     # via
     #   google-adk
     #   google-genai
     #   uvicorn
 wheel==0.48.0
     # via pip-tools
-yarl==1.24.5
+yarl==1.25.1
     # via aiohttp
 
 # The following packages are considered to be unsafe in a requirements file:
