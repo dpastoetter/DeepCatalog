@@ -139,7 +139,7 @@ def test_release_workflow_signs_and_attests():
     text = (_REPO / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     assert "DEEPCATALOG_RELEASE_SIGNING_KEY" in text
     assert "scripts/sign-release-manifest.py" in text
-    assert "actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f" in text
+    assert "actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8" in text
     assert "id-token: write" in text
     assert "attestations: write" in text
     assert SIGSTORE_WORKFLOW_IDENTITY in text
