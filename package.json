@@ -6,8 +6,8 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "happy-dom": "^20.11.2",
-    "pdfjs-dist": "^4.10.38",
+    "happy-dom": "^20.12.0",
+    "pdfjs-dist": "^6.3.289",
     "vitest": "^4.1.11"
   }
 }
