@@ -2,7 +2,7 @@
 
 Deep document intelligence, local-first.
 
-Drop scanned PDFs and photos into an inbox, and DeepCatalog recovers the text with AI vision OCR, extracts structured metadata, proposes a meaningful filename, and files everything into your folder structure — with you in the loop before anything is written. Metadata lands in SQLite, content is indexed for RAG so you can ask questions about your archive in natural language.
+Drop scanned PDFs and photos into an inbox, and DeepCatalog recovers the text with adaptive OCR (PDF text layer → local Tesseract → AI vision), extracts structured metadata, proposes a meaningful filename, and files everything into your folder structure — with human review before consequential writes by default. Metadata lands in SQLite, content is indexed for RAG so you can ask questions about your archive in natural language.
 
 The desktop and web workspace is **DeepCatalog Studio** — your local workspace for archive discovery and automation.
 
@@ -27,10 +27,11 @@ Switching to a cloud provider does not move your filed archive off-disk. It only
 ## Features
 
 - **Ingest pipeline**: Open file → Transcribe → Find details → Name file → Save → Review → Make searchable, with a live workflow strip (Server-Sent Events) and hover descriptions on each step
-- **Adaptive OCR**: per-page text-layer vs AI vision (`fast` / `balanced` / `maximum`); cloud providers run vision pages concurrently
+- **Adaptive OCR**: per-page text-layer → local Tesseract → AI vision (`fast` / `balanced` / `maximum`); cloud providers run vision pages concurrently
 - **Per-file cancel & retry**: stop a stuck or slow file mid-pipeline; retry failed or cancelled items from the inbox queue (readable error toasts for API failures)
-- **Human-in-the-loop review**: proposed filings wait in a review queue where you can correct filename, category, date, parties, reference IDs, amount (financial docs only), and summary before approving — nothing is written until you say so. Turn this off under **Settings → Filing** (the checkbox saves immediately); suspected duplicates still always stop for review
-- **Smart metadata extraction**: category-aware fields — `subject`, `parties`, and `reference_ids` for all document types; amount/currency only for invoices, receipts, bank/tax/utility/insurance documents. Missing `doc_type` defaults to `other`; common aliases (`document_type`, `category`) are accepted
+- **Human-in-the-loop review**: on by default — proposed filings wait in Review so you can correct filename, category, date, parties, reference IDs, amount (financial docs only), and summary before anything is written. Keep this on for consequential filing: document text can steer the model, while code still allowlists categories and confines paths. Turn it off under **Settings → Filing** (saves immediately); suspected duplicates always stop for review
+- **Smart metadata extraction**: JSON schema hint + clamps; `doc_type` allowlisted to your categories; `doc_date` must be `YYYY-MM-DD`; `subject` / `parties` / `reference_ids` for all types; amount/currency only for financial categories. Missing or unknown `doc_type` → `other`; aliases (`document_type`, `category`) accepted
+- **Untrusted document handling**: OCR/RAG text is data, not instructions. Markers label untrusted regions for the model but are **not** a security boundary — filing decisions go through allowlists, path confinement, and optional human review (see [Untrusted documents and filing](#untrusted-documents-and-filing))
 - **Duplicate detection**: SHA-256 file checksums, normalized content hashes, and text-similarity matching flag re-scans and near-duplicates before they are filed
 - **Ask your archive**: grounded RAG + FTS5 keyword search with source citations, a chat-style composer, and optional example questions (no “recent docs” padding when retrieval misses)
 - **Local storage**: inbox and per-category archive folders, `data/deepcatalog.db` (SQLite + FTS5), `data/chroma/` (vectors) — always on this machine; cloud AI does not replace this store
@@ -38,9 +39,9 @@ Switching to a cloud provider does not move your filed archive off-disk. It only
 - **Local Ollama tooling**: start the daemon, pull models, show CPU/GPU usage for loaded models, unload or restart Ollama from Settings
 - **Boot autostart (Linux)**: optional systemd user service so the web UI comes up after login or reboot
 - **Web app**: full-height workbench for Inbox, Review, Archive, Ask, and Settings; keyboard shortcuts (`?` help, `/` Archive search); PDF preview in Review and Archive; four theme presets; toasts; mockup mode for screenshots
-- **Linux AppImage**: download a single `x86_64` binary from GitHub Releases (bundles Python and Poppler; data stays in `~/.local/share/deepcatalog`)
+- **Linux AppImage**: download a single `x86_64` binary from GitHub Releases (bundles Python, Poppler, and Tesseract; data stays in `~/.local/share/deepcatalog`)
 - **Self-update**: check and install new releases from GitHub directly from Settings
-- **CI & coverage**: `./scripts/ci.sh` runs format, lint, mypy, Vitest, and pytest with a coverage floor
+- **CI & coverage**: `./scripts/ci.sh` runs format, lint, mypy, Vitest, pytest (global floor), then focused security-module coverage floors
 
 ## Screenshots
 
@@ -100,13 +101,13 @@ Autostart from Settings writes a systemd user unit that launches this AppImage w
 
 ### Linux (source + venv)
 
-Prerequisites: **Python 3.10+** (with `venv`), **curl**, **tar**, and **Poppler** (`pdftoppm`) for PDF OCR:
+Prerequisites: **Python 3.10+** (with `venv`), **curl**, **tar**, and **Poppler** (`pdftoppm`) for PDF OCR. Optional but recommended: **Tesseract** for fast classical OCR on scans (see [OCR and long documents](#ocr-and-long-documents)).
 
 ```bash
 # Fedora / RHEL
-sudo dnf install poppler-utils
+sudo dnf install poppler-utils tesseract tesseract-langpack-eng
 # Debian / Ubuntu
-sudo apt install python3-venv poppler-utils
+sudo apt install python3-venv poppler-utils tesseract-ocr tesseract-ocr-eng
 ```
 
 ```bash
@@ -142,7 +143,7 @@ This does not delete ChatGPT/OpenAI credentials in `~/.codex/auth.json` or archi
 Prerequisites via Homebrew:
 
 ```bash
-brew install python poppler
+brew install python poppler tesseract
 ```
 
 Same installer as Linux:
@@ -167,7 +168,7 @@ Does not remove `~/.codex/auth.json` or external archive folders. Boot autostart
 
 ### Windows
 
-Prerequisites: **Python 3.10+** from [python.org](https://www.python.org/downloads/) (or `winget install Python.Python.3.12`) and **Poppler** so `pdftoppm` is on `PATH` (for example a [poppler-windows](https://github.com/oschwartz10612/poppler-windows/releases) build, or search with `winget search poppler`).
+Prerequisites: **Python 3.10+** from [python.org](https://www.python.org/downloads/) (or `winget install Python.Python.3.12`) and **Poppler** so `pdftoppm` is on `PATH` (for example a [poppler-windows](https://github.com/oschwartz10612/poppler-windows/releases) build, or search with `winget search poppler`). Optional: [Tesseract](https://github.com/UB-Mannheim/tesseract/wiki) on `PATH` for faster classical OCR.
 
 In PowerShell:
 
@@ -398,8 +399,14 @@ DEEPCATALOG_ALLOW_REMOTE=1
 DEEPCATALOG_API_TOKEN=…
 DEEPCATALOG_SSL_CERTFILE=/path/to/fullchain.pem
 DEEPCATALOG_SSL_KEYFILE=/path/to/privkey.pem
+# Opt-in HSTS for a stable public hostname with a trusted certificate.
+# Never set this for ordinary localhost / self-signed deployments.
+DEEPCATALOG_HSTS=1
+# DEEPCATALOG_HSTS_MAX_AGE=31536000
 python -m deepcatalog.serve --host 0.0.0.0 --port 8443
 ```
+
+Behind a reverse proxy that terminates TLS, set `DEEPCATALOG_HSTS=1` the same way once clients reach you on a real hostname with a trusted cert; loopback Host headers never receive HSTS even when the flag is on.
 
 ### Autostart at boot (Linux + systemd)
 
@@ -440,7 +447,19 @@ Filing rules (source folder, category → folder mapping, poll interval, OCR acc
 
 Progress updates stream over `GET /api/process/events` (SSE). The workflow UI mounts once and patches in place to avoid flicker during rapid updates. Hover a pipeline step for a short description of what that stage does (and live detail while it is running). The strip stays on one row (labels wrap inside equal-height boxes; no horizontal scrollbar).
 
-LLM prompts wrap OCR and retrieved snippets in **per-request** `BEGIN_UNTRUSTED_*_<token>` markers. Delimiter lookalikes inside the document (`BEGIN_UNTRUSTED_DOCUMENT`, `END_UNTRUSTED_DOCUMENT`, nested `_hex` fakes) are rewritten before wrapping so they cannot close the region. Extracted metadata and Ask replies are length-clamped in code; model output is treated as untrusted.
+### Untrusted documents and filing
+
+A scanned PDF can contain text designed to distort classification, extracted metadata, or Ask answers. DeepCatalog treats that content as **untrusted data**, not as something prompt delimiters can fully solve.
+
+| Control | What it does |
+| --- | --- |
+| **Prompt markers** | Soft labels (`BEGIN_UNTRUSTED_*_<token>`) plus lookalike neutralization — help the model; **not** a security boundary |
+| **Structured extract** | JSON parse, length clamps, `doc_type` category allowlist, `YYYY-MM-DD` dates only |
+| **Path confinement** | Sources must stay in the inbox; archive destinations are basename-only under owner-configured category folders |
+| **No ADK tools in production** | Ingest/Ask call `complete_text` / `complete_with_images`; Ollama uses fixed API paths |
+| **Human review** | On by default before archive writes; duplicates always queue. Approve re-applies allowlist/clamps/basename rules |
+
+**Untrusted media isolation:** the long-lived web process only does file-size and magic-byte checks (`media_validate`). All `pypdf` / Pillow / Poppler work runs in `media_worker` (resource-limited subprocess when `DEEPCATALOG_MEDIA_WORKER=1`). CI enforces that those parser imports stay out of other modules (`.semgrep/media-parser-boundary.yml` + `scripts/ci.sh` grep).
 
 ### Metadata & review fields
 
@@ -448,8 +467,8 @@ During **Extract**, the LLM returns JSON with:
 
 | Field | Description |
 | --- | --- |
-| `doc_type` | One of your configured categories (built-in types include invoice, receipt, bank, tax, utility, insurance, letter, contract, certificate, employment, medical, id, education, travel, other). Defaults to `other` when omitted; aliases like `document_type` / `category` are normalized |
-| `doc_date` | Document date when present |
+| `doc_type` | Must be one of your configured categories after allowlist; unknown → `other`. Aliases like `document_type` / `category` are normalized |
+| `doc_date` | Document date when present (`YYYY-MM-DD` only; other forms discarded) |
 | `subject` | Short topic or title |
 | `parties` | Sender, recipient, issuer, etc. |
 | `reference_ids` | Policy numbers, invoice numbers, case refs (list) |
@@ -460,13 +479,29 @@ The review form shows amount/currency only when the selected category is financi
 
 ## OCR and long documents
 
-Text recovery is **adaptive**. For each PDF page the agent assesses the embedded text layer first:
+Text recovery is **adaptive** with three tiers:
 
-- **Fast** — use embedded text when anything usable is present; vision only if the page is nearly empty
-- **Balanced** (default) — use embedded text when quality heuristics pass; vision for weak/garbled/scanned pages
-- **Maximum** — always run AI vision OCR on every page (closest to the old always-vision behavior)
+1. **PDF text layer** (embedded) when quality is good for the active mode
+2. **Classical Tesseract** (local, fast) on rendered page images when the text layer is missing/weak
+3. **AI vision OCR** (multimodal LLM) when Tesseract is unavailable, disabled, skipped (`maximum` mode), or its output fails the same quality heuristics
 
-Image files always use vision. Change the mode under **Settings → Filing & scanning → OCR accuracy**, or set `DEEPCATALOG_OCR_MODE`.
+Mode behavior:
+
+- **Fast** — use embedded text when anything usable is present; Tesseract/vision only if the page is nearly empty
+- **Balanced** (default) — use embedded text when quality heuristics pass; Tesseract then vision for weak/garbled/scanned pages
+- **Maximum** — always run AI vision OCR on every page (skips Tesseract; closest to the old always-vision behavior)
+
+Image files skip the PDF text layer and go Tesseract → vision (or straight to vision when Tesseract is off/missing). Change the mode under **Settings → Filing & scanning → OCR accuracy**, or set `DEEPCATALOG_OCR_MODE`. Toggle Tesseract with the Settings checkbox or `DEEPCATALOG_TESSERACT_ENABLED=0`.
+
+**Tesseract install** (optional but recommended for speed on scans):
+
+- Fedora/RHEL: `sudo dnf install tesseract tesseract-langpack-eng`
+- Debian/Ubuntu: `sudo apt install tesseract-ocr tesseract-ocr-eng`
+- macOS: `brew install tesseract`
+- Windows: install a [UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki) build and ensure `tesseract` is on `PATH`
+- Extra languages: install the langpack and set `DEEPCATALOG_TESSERACT_LANG=eng+deu` (example)
+
+The Linux AppImage vendors `tesseract` + English tessdata. Source installs soft-fail to vision when the binary is missing.
 
 By default, **all PDF pages** are considered (up to 128). Cloud providers run needed vision pages with **bounded concurrency** (`DEEPCATALOG_OCR_CONCURRENCY`, default 4). Local Ollama stays serial by default (`DEEPCATALOG_OCR_CONCURRENCY_OLLAMA=1`). Page images are downscaled before vision OCR.
 
@@ -475,6 +510,10 @@ Tune via `.env` (see `.env.example` for the full list):
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `DEEPCATALOG_OCR_MODE` | `balanced` | `fast` \| `balanced` \| `maximum` (overrides Settings) |
+| `DEEPCATALOG_TESSERACT_ENABLED` | `1` | Master switch for the classical OCR tier |
+| `DEEPCATALOG_TESSERACT_LANG` | `eng` | Tessdata language(s), e.g. `eng+deu` |
+| `DEEPCATALOG_TESSERACT_TIMEOUT` | `60` | Seconds per Tesseract page |
+| `DEEPCATALOG_TESSERACT_PSM` | `3` | Tesseract page segmentation mode |
 | `DEEPCATALOG_OCR_CONCURRENCY` | `4` | Parallel vision pages for cloud providers |
 | `DEEPCATALOG_OCR_CONCURRENCY_OLLAMA` | `1` | Parallel vision pages for local Ollama |
 | `DEEPCATALOG_OCR_MAX_PAGES` | `0` (all) | Cap pages per document; `0` = all up to safety max |
@@ -573,15 +612,16 @@ git checkout v0.6.5
 
 ```bash
 pip install -e ".[dev]" -c constraints.txt   # pytest, pytest-cov, ruff, mypy, pip-tools
-./scripts/ci.sh                 # quality gate (format, lint, pip check, mypy, JS, Vitest, pytest+coverage)
+./scripts/ci.sh                 # quality gate (format, lint, pip check, mypy, JS, Vitest, pytest+coverage, security floors)
+./scripts/coverage-security.sh  # re-check focused floors after pytest (needs .coverage)
 ./scripts/dependency-audit.sh   # pip-audit (OSV) + npm audit
 python scripts/chroma-advisory-watch.py  # unsuppressed Chroma/OSV watch (scheduled in CI)
 ./scripts/secret-scan.sh        # gitleaks (pinned binary, checksum-verified)
-./scripts/sast-scan.sh          # Semgrep ERROR-severity (Python + JavaScript)
+./scripts/sast-scan.sh          # Semgrep ERROR-severity (Python + JavaScript; media-parser boundary)
 ./scripts/precommit.sh          # secret guard + CI gate (also usable as a git hook)
 ```
 
-Coverage is measured with `pytest-cov` (`deepcatalog`, `app`, `query_agent`; branch coverage). CI fails if total coverage drops below the floor in `pyproject.toml` (`--cov-fail-under`). HTML report: `htmlcov/` (gitignored). Desktop GUI (`desktop.py`) and live network/Ollama/systemd are mocked or omitted — unit-test their helpers instead.
+Coverage is measured with `pytest-cov` (`deepcatalog`, `app`, `query_agent`; branch coverage). CI fails if total coverage drops below the floor in `pyproject.toml` (`--cov-fail-under=65`). After the suite, `scripts/coverage-security.sh` also enforces focused floors on security-sensitive modules (`local_security`, `sessions`, `updater`, `ollama_url`, `media_validate` / `media_worker`, `tools/filesystem`) rather than only raising the global percentage. HTML report: `htmlcov/` (gitignored). Desktop GUI (`desktop.py`) is omitted from coverage; `deepcatalog.llm` and `deepcatalog.desktop` are type-checked with mypy (no `ignore_errors`). Live network/Ollama/systemd are mocked — unit-test their helpers instead.
 
 Pure frontend helpers (`app/static/api.js`, `router.js`, `state.js`) have a small Vitest harness (`npm test`). Install Node deps once with `npm install`; CI runs the same suite after the JS syntax check.
 
@@ -639,10 +679,13 @@ python scripts/watch_inbox.py --process-existing
 ```
 deepcatalog/       # ingest pipeline, review queue, dedup, updater, auth/llm helpers
   ingest.py            #   OCR → extract → name → review gate → file + index
-  ocr.py               #   adaptive text-layer / vision OCR, PDF render, image prep
+  ocr.py               #   adaptive text-layer / Tesseract / vision OCR
+  tesseract_ocr.py     #   classical OCR probe + page transcription
+  media_validate.py    #   parent: size + magic bytes only
+  media_worker.py      #   only module allowed to import pypdf/Pillow/pdf2image
   llm.py               #   production OpenAI / Codex / Gemini / Ollama completions + cancel
   adk_debug.py         #   local `adk web` / `adk run` only (not production ingest/Ask)
-  prompt_safety.py     #   untrusted-content markers + output clamps
+  prompt_safety.py     #   untrusted-doc policy; clamps, allowlists, filing sanitize
   providers/           #   LlmProvider interface (text, vision, embeddings, health, usage)
   progress.py          #   SSE progress + pipeline step labels/descriptions
   job_control.py       #   per-file cancel events for ingest
@@ -663,7 +706,7 @@ app/                   # FastAPI app (main.py + routers/) and ES-module UI (stat
   routers/             #   documents, reviews, settings, processing, auth, updates
   schemas.py           #   request/response models
   static/              #   api.js, inbox.js, review.js, settings.js, events.js, keyboard.js, pdf-preview.js, …
-scripts/               # install.sh, install.ps1, ci.sh, dependency-audit.sh, chroma-advisory-watch.py, secret-scan.sh, sast-scan.sh, precommit.sh, watch_inbox.py, …
+scripts/               # install.sh, install.ps1, ci.sh, coverage-security.sh, dependency-audit.sh, chroma-advisory-watch.py, secret-scan.sh, sast-scan.sh, precommit.sh, watch_inbox.py, …
 packaging/linux/       # AppImage AppRun, .desktop, icon
 tests/                 # pytest (Python) + tests/frontend (Vitest)
 docs/screenshots/      # README screenshots (generated with mockup mode)
@@ -693,9 +736,12 @@ DEEPCATALOG_LLM_PROVIDER=ollama   # gemini | openai | ollama
 DEEPCATALOG_MODEL=gemma3
 DEEPCATALOG_EMBEDDING_MODEL=nomic-embed-text
 OLLAMA_BASE_URL=http://localhost:11434
+# DEEPCATALOG_MEDIA_WORKER=1          # isolate Poppler/Pillow/pypdf (recommended)
+# DEEPCATALOG_TESSERACT_ENABLED=1     # classical OCR before AI vision
+# DEEPCATALOG_HSTS=1                  # opt-in; never for localhost/self-signed
 ```
 
-Runtime settings (inbox path, categories, poll interval, review requirement) are edited in the web UI and stored in `data/settings.json`, not in `.env`.
+Runtime settings (inbox path, categories, poll interval, OCR mode, review requirement) are edited in the web UI and stored in `data/settings.json`, not in `.env`.
 
 ## License
 

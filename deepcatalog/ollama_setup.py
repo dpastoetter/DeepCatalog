@@ -849,6 +849,9 @@ def host_subprocess_env(base: dict[str, str] | None = None) -> dict[str, str]:
         "GSETTINGS_BACKEND",
         "GTK_DATA_PREFIX",
         "GTK_THEME",
+        "GTK_PATH",
+        "GTK_EXE_PREFIX",
+        "GTK_IM_MODULE_FILE",
         "WEBKIT_EXEC_PATH",
         "WEBKIT_INJECTED_BUNDLE_PATH",
         "WEBKIT_FORCE_SANDBOX",
@@ -867,6 +870,8 @@ def host_subprocess_env(base: dict[str, str] | None = None) -> dict[str, str]:
         if "deepcatalog-webkit" in entry:
             return False
         if "/tmp/.mount_" in entry or entry.startswith("/tmp/.mount"):
+            return False
+        if "/tmp/.dc/" in entry:
             return False
         return True
 
@@ -900,6 +905,49 @@ def host_subprocess_env(base: dict[str, str] | None = None) -> dict[str, str]:
         prefix = str(ollama_lib)
         env["LD_LIBRARY_PATH"] = f"{prefix}:{existing}" if existing else prefix
 
+    return env
+
+
+def host_desktop_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """
+    Environment for host GUI tools (xdg-open, gio, Nautilus) from an AppImage.
+
+    Like ``host_subprocess_env``, but never keeps ``LD_LIBRARY_PATH`` (Ollama
+    libs also break Debian file managers / PDF viewers) and strips portal /
+    AppImage identity vars that confuse FreeDesktop openers.
+    """
+    env = host_subprocess_env(base)
+    for key in (
+        "LD_LIBRARY_PATH",
+        "LD_PRELOAD",
+        "GTK_USE_PORTAL",
+        "APPDIR",
+        "APPIMAGE",
+        "APPIMAGE_EXTRACT_AND_RUN",
+        "ARGV0",
+        "OWD",
+        "QT_PLUGIN_PATH",
+        "QT_QPA_PLATFORM_PLUGIN_PATH",
+        "QTWEBENGINEPROCESS_PATH",
+        "GST_PLUGIN_PATH",
+        "GST_PLUGIN_SYSTEM_PATH",
+        "GST_PLUGIN_SYSTEM_PATH_1_0",
+        "PERL5LIB",
+        "DEEPCATALOG_APPIMAGE",
+        "DEEPCATALOG_PROJECT_ROOT",
+    ):
+        env.pop(key, None)
+
+    path_parts = [part for part in env.get("PATH", "").split(":") if part]
+    for essential in ("/usr/bin", "/bin"):
+        if essential not in path_parts:
+            path_parts.append(essential)
+    env["PATH"] = ":".join(path_parts)
+
+    if not env.get("XDG_DATA_DIRS"):
+        env["XDG_DATA_DIRS"] = "/usr/local/share:/usr/share"
+    if not env.get("XDG_CONFIG_DIRS"):
+        env["XDG_CONFIG_DIRS"] = "/etc/xdg"
     return env
 
 

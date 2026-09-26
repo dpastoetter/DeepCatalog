@@ -64,6 +64,15 @@ else
   warn "  macOS:         brew install poppler"
 fi
 
+if command -v tesseract >/dev/null; then
+  ok "tesseract — classical OCR fast path ready"
+else
+  warn "tesseract not found — scanned pages fall back to slower AI vision OCR"
+  warn "  Fedora/RHEL:  sudo dnf install tesseract tesseract-langpack-eng"
+  warn "  Debian/Ubuntu: sudo apt install tesseract-ocr tesseract-ocr-eng"
+  warn "  macOS:         brew install tesseract"
+fi
+
 install_from_release() {
   need_cmd python3
   local api="https://api.github.com/repos/${REPO}/releases/latest"

@@ -11,11 +11,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from pypdf import PdfReader
-
 from deepcatalog.config import ensure_data_dirs
 from deepcatalog.media_validate import MediaValidationError, validate_scan_file
-from deepcatalog.ollama_setup import host_subprocess_env
+from deepcatalog.media_worker import MediaWorkerError, extract_pdf_page_texts_isolated
+from deepcatalog.ollama_setup import host_desktop_env
 from deepcatalog.settings import get_folder_for_category, get_source_dir
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp"}
@@ -143,32 +142,121 @@ def clear_inbox() -> dict[str, Any]:
     }
 
 
+def _which_host(name: str, env: dict[str, str]) -> str | None:
+    """Resolve a host binary using the cleaned desktop PATH."""
+    path = env.get("PATH")
+    found = shutil.which(name, path=path)
+    if found:
+        return found
+    for candidate in (f"/usr/bin/{name}", f"/bin/{name}"):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _run_host_cmd(
+    argv: list[str],
+    *,
+    env: dict[str, str],
+    timeout: float = 4.0,
+) -> bool:
+    """
+    Run a host desktop helper and treat a quick non-zero exit as failure.
+
+    ``xdg-open`` / ``gio`` normally return promptly after handing off. A crash
+    from polluted AppImage libs also returns quickly — do not report success
+    in that case. Long-lived helpers are accepted after ``timeout``.
+    """
+    try:
+        completed = subprocess.run(  # noqa: S603
+            argv,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+            start_new_session=True,
+        )
+    except subprocess.TimeoutExpired:
+        # Still running after handoff — treat as success.
+        return True
+    except OSError:
+        return False
+    return completed.returncode == 0
+
+
+def _reveal_via_file_manager1(file_path: Path, env: dict[str, str]) -> bool:
+    """Ask the session file manager to select ``file_path`` (FreeDesktop)."""
+    uri = file_path.as_uri()
+    gdbus = _which_host("gdbus", env)
+    if gdbus:
+        return _run_host_cmd(
+            [
+                gdbus,
+                "call",
+                "--session",
+                "--dest",
+                "org.freedesktop.FileManager1",
+                "--object-path",
+                "/org/freedesktop/FileManager1",
+                "--method",
+                "org.freedesktop.FileManager1.ShowItems",
+                f"['{uri}']",
+                "",
+            ],
+            env=env,
+        )
+    dbus_send = _which_host("dbus-send", env)
+    if dbus_send:
+        return _run_host_cmd(
+            [
+                dbus_send,
+                "--session",
+                "--dest=org.freedesktop.FileManager1",
+                "--type=method_call",
+                "/org/freedesktop/FileManager1",
+                "org.freedesktop.FileManager1.ShowItems",
+                f"array:string:{uri}",
+                "string:",
+            ],
+            env=env,
+        )
+    return False
+
+
+def _open_path_with_host(path: Path, env: dict[str, str]) -> bool:
+    """Open a file or directory with the host default handler."""
+    target = str(path)
+    for name, extra in (
+        ("gio", ["open", target]),
+        ("xdg-open", [target]),
+    ):
+        exe = _which_host(name, env)
+        if not exe:
+            continue
+        if _run_host_cmd([exe, *extra], env=env):
+            return True
+    return False
+
+
 def reveal_in_explorer(path: str) -> dict[str, Any]:
     """
     Reveal a local file in the system file manager (or open its folder).
 
-    On Linux this prefers selecting the file in Nautilus/Dolphin when available,
-    otherwise opens the parent folder with xdg-open.
-
-    Host tools are launched with ``host_subprocess_env`` so AppImage WebKit
-    libraries on ``LD_LIBRARY_PATH`` do not break Nautilus/xdg-open.
+    On Linux this prefers the FreeDesktop FileManager1 D-Bus API, then
+    ``gio`` / ``xdg-open`` on the parent folder. Host tools are launched with
+    ``host_desktop_env`` so AppImage / Ollama library paths cannot crash them.
     """
     file_path = Path(path).expanduser().resolve()
     if not file_path.exists():
         return {"status": "error", "error": f"file not found: {path}"}
 
-    env = host_subprocess_env()
-    which_path = env.get("PATH")
+    env = host_desktop_env()
     system = platform.system()
     try:
         if system == "Darwin":
-            subprocess.Popen(  # noqa: S603
-                ["open", "-R", str(file_path)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-                env=env,
-            )
+            if not _run_host_cmd(["open", "-R", str(file_path)], env=env):
+                return {"status": "error", "error": "could not open the file manager"}
         elif system == "Windows":
             subprocess.Popen(  # noqa: S603
                 ["explorer", "/select,", str(file_path)],
@@ -178,32 +266,40 @@ def reveal_in_explorer(path: str) -> dict[str, Any]:
                 env=env,
             )
         else:
-            # Linux / FreeDesktop
-            parent = str(file_path.parent)
-            launched = False
+            if _reveal_via_file_manager1(file_path, env):
+                return {
+                    "status": "success",
+                    "path": str(file_path),
+                    "opened": "file-manager1",
+                }
+            # Select helpers (may exist but crash under a bad env — verify exit).
             for cmd in (
                 ["nautilus", "--select", str(file_path)],
                 ["dolphin", "--select", str(file_path)],
                 ["nemo", str(file_path)],
-                ["xdg-open", parent],
             ):
-                exe = shutil.which(cmd[0], path=which_path)
+                exe = _which_host(cmd[0], env)
                 if not exe:
                     continue
-                subprocess.Popen(  # noqa: S603
-                    [exe, *cmd[1:]],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                    env=env,
-                )
-                launched = True
-                break
-            if not launched:
+                if _run_host_cmd([exe, *cmd[1:]], env=env, timeout=2.0):
+                    return {
+                        "status": "success",
+                        "path": str(file_path),
+                        "opened": cmd[0],
+                    }
+            if _open_path_with_host(file_path.parent, env):
                 return {
-                    "status": "error",
-                    "error": "No file manager found (tried nautilus, dolphin, nemo, xdg-open)",
+                    "status": "success",
+                    "path": str(file_path),
+                    "opened": "folder",
                 }
+            return {
+                "status": "error",
+                "error": (
+                    "Could not open a file manager (tried FileManager1, nautilus, "
+                    "dolphin, nemo, gio, xdg-open)"
+                ),
+            }
     except OSError:
         return {"status": "error", "error": "could not open the file manager"}
 
@@ -216,40 +312,29 @@ def reveal_in_explorer(path: str) -> dict[str, Any]:
 
 def open_with_os(path: str) -> dict[str, Any]:
     """
-    Open a local file with the desktop default application (xdg-open / open).
+    Open a local file with the desktop default application (gio / xdg-open).
 
-    Uses ``host_subprocess_env`` so AppImage-bundled WebKit libs do not break
-    the host PDF viewer or image app.
+    Uses ``host_desktop_env`` so AppImage-bundled WebKit / Ollama libs do not
+    break the host PDF viewer or image app.
     """
     file_path = Path(path).expanduser().resolve()
     if not file_path.exists() or not file_path.is_file():
         return {"status": "error", "error": f"file not found: {path}"}
 
-    env = host_subprocess_env()
-    which_path = env.get("PATH")
+    env = host_desktop_env()
     system = platform.system()
     try:
         if system == "Darwin":
-            subprocess.Popen(  # noqa: S603
-                ["open", str(file_path)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-                env=env,
-            )
+            if not _run_host_cmd(["open", str(file_path)], env=env):
+                return {"status": "error", "error": "could not open the file"}
         elif system == "Windows":
             os.startfile(str(file_path))  # type: ignore[attr-defined]
         else:
-            exe = shutil.which("xdg-open", path=which_path)
-            if not exe:
-                return {"status": "error", "error": "xdg-open is not available"}
-            subprocess.Popen(  # noqa: S603
-                [exe, str(file_path)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-                env=env,
-            )
+            if not _open_path_with_host(file_path, env):
+                return {
+                    "status": "error",
+                    "error": "Could not open the file (tried gio and xdg-open)",
+                }
     except OSError:
         return {"status": "error", "error": "could not open the file"}
 
@@ -297,11 +382,8 @@ def read_document(path: str) -> dict[str, Any]:
     if suffix in PDF_SUFFIXES:
         try:
             media = validate_scan_file(file_path)
-            reader = PdfReader(str(file_path), strict=False)
-            pages = []
-            for i, page in enumerate(reader.pages):
-                page_text = page.extract_text() or ""
-                pages.append({"page": i + 1, "text": page_text})
+            page_texts = extract_pdf_page_texts_isolated(file_path)
+            pages = [{"page": i + 1, "text": text} for i, text in enumerate(page_texts)]
             result["page_count"] = media.get("page_count", len(pages))
             result["pages"] = pages
             result["text"] = "\n\n".join(
@@ -314,6 +396,8 @@ def read_document(path: str) -> dict[str, Any]:
                 )
         except MediaValidationError as exc:
             return {"status": "error", "error": str(exc), "code": exc.code}
+        except MediaWorkerError as exc:
+            return {"status": "error", "error": f"failed to read PDF: {exc}", "code": exc.code}
         except Exception as exc:  # noqa: BLE001 - surface to agent
             return {"status": "error", "error": f"failed to read PDF: {exc}"}
     else:

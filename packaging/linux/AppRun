@@ -17,6 +17,11 @@ export PYTHONPATH="${DEEPCATALOG_PROJECT_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
 # Official Ollama installs to ~/.local/bin; .desktop launches often omit it.
 export PATH="$HERE/usr/bin:${HOME:+$HOME/.local/bin:}${PATH:-}"
 
+# Bundled English tessdata for classical OCR (AppImage).
+if [ -d "$HERE/usr/share/tessdata" ] && [ -z "${TESSDATA_PREFIX:-}" ]; then
+  export TESSDATA_PREFIX="$HERE/usr/share/tessdata"
+fi
+
 # Probe GNOME color-scheme *before* WebKit LD_LIBRARY_PATH. Host gsettings
 # under the Ubuntu WebKit libs often returns a false 'default' instead of
 # prefer-dark, which forced light CSD on Debian/Fedora dark sessions.

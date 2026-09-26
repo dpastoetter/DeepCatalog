@@ -9,8 +9,9 @@
 #   DEEPCATALOG_APPIMAGE_WORKDIR=1 ./scripts/build-appimage.sh
 #     Pack HEAD plus uncommitted tracked files (local test images).
 #
-# Requires: linux x86_64, git, curl, tar, python3, pdftoppm, pdfinfo, patchelf, ldd,
-# gcc, pkg-config, meson, ninja, WebKitGTK 4.1 or 4.0, gobject-introspection, cairo headers
+# Requires: linux x86_64, git, curl, tar, python3, pdftoppm, pdfinfo, tesseract,
+# patchelf, ldd, gcc, pkg-config, meson, ninja, WebKitGTK 4.1 or 4.0,
+# gobject-introspection, cairo headers
 # (see CI apt list in .github/workflows/release.yml / appimage.yml).
 # Downloads a pinned CPython and appimagetool (SHA-256 verified).
 #
@@ -43,6 +44,10 @@ APPIMAGETOOL_SHA256="a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9
 die() {
   echo "$*" >&2
   exit 1
+}
+
+warn() {
+  echo "warning: $*" >&2
 }
 
 need_cmd() {
@@ -403,6 +408,7 @@ need_cmd ldd
 need_cmd patchelf
 need_cmd pdftoppm
 need_cmd pdfinfo
+need_cmd tesseract
 need_cmd file
 
 if ! git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -523,6 +529,23 @@ PYTHON="$APPDIR/usr/bin/python3"
 VENDOR_MODE=poppler
 vendor_binary "$(command -v pdftoppm)" "$APPDIR/usr/bin" "$APPDIR/usr/lib/deepcatalog-native"
 vendor_binary "$(command -v pdfinfo)" "$APPDIR/usr/bin" "$APPDIR/usr/lib/deepcatalog-native"
+
+# Classical OCR fast path — bundled for AppImage users.
+vendor_binary "$(command -v tesseract)" "$APPDIR/usr/bin" "$APPDIR/usr/lib/deepcatalog-native"
+mkdir -p "$APPDIR/usr/share/tessdata"
+for tessdir in \
+    /usr/share/tesseract-ocr/*/tessdata \
+    /usr/share/tessdata \
+    /usr/local/share/tessdata
+do
+  if [ -f "$tessdir/eng.traineddata" ]; then
+    cp -a "$tessdir/eng.traineddata" "$APPDIR/usr/share/tessdata/"
+    break
+  fi
+done
+[ -f "$APPDIR/usr/share/tessdata/eng.traineddata" ] \
+  || die "tesseract eng.traineddata not found on build host (install tesseract-ocr-eng)"
+
 vendor_webkit_stack "$APPDIR/usr/lib/deepcatalog-webkit"
 
 download_verified "$APPIMAGETOOL_URL" "$CACHE/appimagetool-x86_64.AppImage" "$APPIMAGETOOL_SHA256"
@@ -545,6 +568,9 @@ rm -rf "$DIST/squashfs-root"
 SMOKE="$DIST/squashfs-root"
 [ -x "$SMOKE/usr/bin/python3" ] || die "extracted AppImage is missing python3"
 [ -x "$SMOKE/usr/bin/pdftoppm" ] || die "extracted AppImage is missing pdftoppm"
+[ -x "$SMOKE/usr/bin/tesseract" ] || die "extracted AppImage is missing tesseract"
+[ -f "$SMOKE/usr/share/tessdata/eng.traineddata" ] \
+  || die "extracted AppImage is missing eng.traineddata"
 DEEPCATALOG_PROJECT_ROOT="$SMOKE/opt/deepcatalog" \
   PYTHONPATH="$SMOKE/opt/deepcatalog" \
   "$SMOKE/usr/bin/python3" -c "from app.main import app; print(app.version)"

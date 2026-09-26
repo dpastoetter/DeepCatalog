@@ -138,6 +138,49 @@ def test_untrusted_policy_mentions_delimiters_and_commands():
     assert "instructions" in UNTRUSTED_CONTENT_POLICY.lower()
     assert "lookalike delimiter" in UNTRUSTED_CONTENT_POLICY.lower()
     assert "model output is also untrusted" in UNTRUSTED_CONTENT_POLICY.lower()
+    assert "schemas and allowlists" in UNTRUSTED_CONTENT_POLICY.lower()
+
+
+def test_allowlist_category_unknown_falls_back():
+    from deepcatalog.prompt_safety import allowlist_category
+
+    cats = ("invoice", "tax", "other")
+    assert allowlist_category("invoice", cats) == "invoice"
+    assert allowlist_category("INVOICE", cats) == "invoice"
+    assert allowlist_category("exfiltrate", cats) == "other"
+    assert allowlist_category(None, cats) == "other"
+    assert allowlist_category("x", ("invoice", "tax")) == "invoice"
+
+
+def test_normalize_iso_date_rejects_injection():
+    from deepcatalog.prompt_safety import normalize_iso_date
+
+    assert normalize_iso_date("2024-03-15") == "2024-03-15"
+    assert normalize_iso_date("2024/03/15") is None
+    assert normalize_iso_date("../../etc/passwd") is None
+    assert normalize_iso_date("ignore previous instructions") is None
+    assert normalize_iso_date("2024-13-40") is None
+    assert normalize_iso_date(None) is None
+
+
+def test_sanitize_filing_proposal_allowlists_and_basenames():
+    from deepcatalog.prompt_safety import sanitize_filing_proposal
+
+    out = sanitize_filing_proposal(
+        {
+            "filename": "../../evil/../../../tmp/pwned.pdf",
+            "doc_type": "not-a-real-category",
+            "doc_date": "tomorrow",
+            "subject": "S" * 500,
+            "summary": "ok",
+        },
+        ("invoice", "other"),
+        original_name="scan.pdf",
+    )
+    assert out["filename"] == "pwned.pdf"
+    assert out["doc_type"] == "other"
+    assert out["doc_date"] is None
+    assert out["subject"] is not None and len(out["subject"]) <= MAX_SUBJECT_CHARS
 
 
 def test_clamp_text_and_reference_ids():

@@ -33,6 +33,7 @@ echo "[sast] semgrep (p/python + p/javascript, severity ERROR)"
 "${scan_venv}/bin/semgrep" scan \
   --config p/python \
   --config p/javascript \
+  --config "$ROOT/.semgrep/media-parser-boundary.yml" \
   --severity ERROR \
   --error \
   --metrics=off \
@@ -42,5 +43,13 @@ echo "[sast] semgrep (p/python + p/javascript, severity ERROR)"
   --exclude dist \
   --exclude tests \
   || fail "semgrep found ERROR-severity issues"
+
+echo "[sast] media parser boundary (grep fallback)"
+# Cheap CI grep so the architectural rule fails even if Semgrep rules drift.
+if rg -n --glob '!deepcatalog/media_worker.py' --glob '!tests/**' \
+    -e '^\s*(from\s+pypdf|import\s+pypdf|from\s+pdf2image|import\s+pdf2image|from\s+PIL|import\s+PIL)\b' \
+    deepcatalog app query_agent 2>/dev/null; then
+  fail "untrusted PDF/image parser import outside deepcatalog/media_worker.py"
+fi
 
 echo "✓ Semgrep scan passed"

@@ -380,6 +380,60 @@ function formatOllamaCompute(ollama) {
   return ` · ${label}`;
 }
 
+/** Last status payload — used to re-evaluate Pull when the user changes selects. */
+let lastOllamaStatus = null;
+
+export function peekOllamaStatus() {
+  return lastOllamaStatus;
+}
+
+export function modelNameMatches(installed, wanted) {
+  const inst = String(installed || "")
+    .trim()
+    .toLowerCase();
+  const want = String(wanted || "")
+    .trim()
+    .toLowerCase();
+  if (!inst || !want) return false;
+  if (inst === want) return true;
+  if (inst.startsWith(`${want}:`)) return true;
+  return inst.split(":", 1)[0] === want.split(":", 1)[0];
+}
+
+export function tagsIncludeModel(installed, wanted) {
+  return (installed || []).some((tag) => modelNameMatches(tag, wanted));
+}
+
+/** Models chosen in the UI that are not present in Ollama yet. */
+export function selectedOllamaModelsMissing(ollama) {
+  const installed = Array.isArray(ollama?.installed_models) ? ollama.installed_models : [];
+  const missing = [];
+  for (const id of ["ollama-chat-model", "ollama-embed-model"]) {
+    const value = document.getElementById(id)?.value?.trim();
+    if (value && !tagsIncludeModel(installed, value)) {
+      missing.push(value);
+    }
+  }
+  return missing;
+}
+
+export function syncOllamaPullButton(ollama = lastOllamaStatus) {
+  const pullBtn = document.getElementById("ollama-pull");
+  if (!pullBtn) return;
+  if (!ollama) {
+    pullBtn.disabled = true;
+    return;
+  }
+  const offline = !ollama.reachable || ollama.listening === false;
+  if (offline) {
+    pullBtn.disabled = true;
+    return;
+  }
+  const selectedMissing = selectedOllamaModelsMissing(ollama);
+  const configuredMissing = Array.isArray(ollama.missing_models) ? ollama.missing_models : [];
+  pullBtn.disabled = !(selectedMissing.length || configuredMissing.length);
+}
+
 export function fillOllamaModelSelects(ollama) {
   /** Rebuild chat/embed dropdowns from catalog ∪ installed ∪ current config. */
   const chatSelect = document.getElementById("ollama-chat-model");
@@ -397,16 +451,25 @@ export function fillOllamaModelSelects(ollama) {
     for (const item of entries) {
       const id = String(item?.id || "").trim();
       if (!id) continue;
-      byId.set(id, String(item?.label || id));
+      const baseLabel = String(item?.label || id);
+      const needsPull = !tagsIncludeModel(installed, id);
+      byId.set(id, needsPull ? `${baseLabel} — not installed` : baseLabel);
     }
     for (const tag of installed) {
       const id = String(tag || "").trim();
       if (!id || byId.has(id)) continue;
       byId.set(id, `${id} (installed)`);
     }
-    const selected = String(current || previous || "").trim();
+    const server = String(current || "").trim();
+    // Keep the user's in-progress pick across health polls; only fall back to
+    // the saved server value when the select is empty (first paint).
+    const selected = String(previous || server || "").trim();
     if (selected && !byId.has(selected)) {
-      byId.set(selected, `${selected} (configured)`);
+      const needsPull = !tagsIncludeModel(installed, selected);
+      byId.set(
+        selected,
+        needsPull ? `${selected} (configured · not installed)` : `${selected} (configured)`,
+      );
     }
     const options = [...byId.entries()].sort((a, b) => a[0].localeCompare(b[0]));
     select.innerHTML = "";
@@ -418,6 +481,8 @@ export function fillOllamaModelSelects(ollama) {
     }
     if (selected && byId.has(selected)) {
       select.value = selected;
+    } else if (server && byId.has(server)) {
+      select.value = server;
     } else if (options.length) {
       select.value = options[0][0];
     }
@@ -432,12 +497,13 @@ export function renderOllamaStatus(ollama) {
   const hintEl = document.getElementById("ollama-hint");
   const section =
     document.getElementById("auth-section") || document.getElementById("settings-ai");
-  const pullBtn = document.getElementById("ollama-pull");
   const startBtn = document.getElementById("ollama-start");
+  lastOllamaStatus = ollama || null;
   fillOllamaModelSelects(ollama);
   if (!ollama) {
     if (statusEl) statusEl.textContent = "Ollama status unavailable";
     if (startBtn) startBtn.disabled = true;
+    syncOllamaPullButton(null);
     return;
   }
 
@@ -461,22 +527,27 @@ export function renderOllamaStatus(ollama) {
           : "Install Ollama, start it (`ollama serve`), then click Use Ollama.");
     }
     if (section) section.dataset.ready = "false";
-    if (pullBtn) pullBtn.disabled = true;
+    syncOllamaPullButton(ollama);
     setStatus("need-auth", "ollama offline");
     return;
   }
 
-  if (pullBtn) pullBtn.disabled = !(ollama.missing_models || []).length;
+  const selectedMissing = selectedOllamaModelsMissing(ollama);
+  const configuredMissing = Array.isArray(ollama.missing_models) ? ollama.missing_models : [];
+  syncOllamaPullButton(ollama);
 
-  if (ollama.missing_models?.length) {
+  if (selectedMissing.length || configuredMissing.length) {
+    const missing = selectedMissing.length ? selectedMissing : configuredMissing;
     if (statusEl) {
-      statusEl.textContent = `Ollama is running — missing models: ${ollama.missing_models.join(", ")}`;
+      statusEl.textContent = `Ollama is running — missing models: ${missing.join(", ")}`;
       statusEl.dataset.tone = "warn";
     }
     if (hintEl) {
-      hintEl.textContent = ollama.pull_command
-        ? `Run: ${ollama.pull_command}`
-        : "Pull the required models, then refresh.";
+      hintEl.textContent = selectedMissing.length
+        ? "Click Pull required models to download the models selected above."
+        : ollama.pull_command
+          ? `Run: ${ollama.pull_command}`
+          : "Pull the required models, then refresh.";
     }
     if (section) section.dataset.ready = ollama.active ? "false" : section.dataset.ready;
     setStatus("need-auth", "ollama · models needed");

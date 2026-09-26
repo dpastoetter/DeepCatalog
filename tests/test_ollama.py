@@ -626,6 +626,38 @@ def test_host_subprocess_env_strips_appimage_libs(tmp_path, monkeypatch):
     assert str(home / ".local" / "bin") in env["PATH"].split(":")
 
 
+def test_host_desktop_env_clears_library_path(tmp_path, monkeypatch):
+    from deepcatalog.ollama_setup import host_desktop_env
+
+    appdir = tmp_path / "squashfs-root"
+    webkit = appdir / "usr" / "lib" / "deepcatalog-webkit"
+    webkit.mkdir(parents=True)
+    home = tmp_path / "home"
+    (home / ".local" / "lib" / "ollama").mkdir(parents=True)
+    (home / ".local" / "bin").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    env = host_desktop_env(
+        {
+            "HOME": str(home),
+            "APPDIR": str(appdir),
+            "APPIMAGE": str(tmp_path / "DeepCatalog.AppImage"),
+            "LD_LIBRARY_PATH": f"{webkit}:/usr/lib",
+            "PATH": f"{appdir}/usr/bin:/usr/bin",
+            "GTK_USE_PORTAL": "1",
+            "GSETTINGS_BACKEND": "memory",
+            "XDG_DATA_DIRS": f"{appdir}/usr/share:/usr/share",
+        }
+    )
+    assert "LD_LIBRARY_PATH" not in env
+    assert "APPDIR" not in env
+    assert "APPIMAGE" not in env
+    assert "GTK_USE_PORTAL" not in env
+    assert "GSETTINGS_BACKEND" not in env
+    assert str(appdir / "usr" / "bin") not in env["PATH"].split(":")
+    assert "/usr/bin" in env["PATH"].split(":")
+    assert env["XDG_DATA_DIRS"] == "/usr/share"
+
+
 def test_find_ollama_binary_checks_local_bin(tmp_path, monkeypatch):
     home = tmp_path / "home"
     local_bin = home / ".local" / "bin"

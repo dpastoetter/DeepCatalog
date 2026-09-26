@@ -331,7 +331,7 @@
     ].map((name) => ({ name, folder: `/home/demo/DeepCatalog/archive/${name}` })),
     batch: { poll_interval_seconds: 30 },
     review: { require_approval: true },
-    ocr: { mode: "balanced" },
+    ocr: { mode: "balanced", tesseract: true },
   };
 
   const ASK = {
@@ -563,6 +563,14 @@
     [
       /^\/api\/documents\/([^/?#]+)\/reveal$/,
       () => ({ status: "success", path: "/home/demo/DeepCatalog/archive", opened: "explorer" }),
+    ],
+    [
+      /^\/api\/documents\/([^/?#]+)\/open$/,
+      () => ({ status: "success", path: "/home/demo/DeepCatalog/archive/demo.pdf", opened: "os" }),
+    ],
+    [
+      /^\/api\/reviews\/([^/?#]+)\/open$/,
+      () => ({ status: "success", path: "/home/demo/inbox/scan.pdf", opened: "os" }),
     ],
     [
       /^\/api\/documents\/([^/?#]+)$/,

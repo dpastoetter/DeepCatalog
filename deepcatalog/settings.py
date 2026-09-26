@@ -50,6 +50,8 @@ def default_settings() -> dict[str, Any]:
         "ocr": {
             # fast | balanced | maximum — see deepcatalog.ocr.resolve_ocr_mode
             "mode": "balanced",
+            # Classical Tesseract before AI vision when the binary is available.
+            "tesseract": True,
         },
     }
 
@@ -223,6 +225,7 @@ def validate_settings(payload: dict[str, Any]) -> dict[str, Any]:
     mode = str(ocr_raw.get("mode") or "balanced").strip().lower()
     if mode not in {"fast", "balanced", "maximum"}:
         raise ValueError("ocr.mode must be one of: fast, balanced, maximum")
+    tesseract = bool(ocr_raw.get("tesseract", True))
 
     return {
         "source_dir": str(source_dir),
@@ -235,6 +238,7 @@ def validate_settings(payload: dict[str, Any]) -> dict[str, Any]:
         },
         "ocr": {
             "mode": mode,
+            "tesseract": tesseract,
         },
     }
 

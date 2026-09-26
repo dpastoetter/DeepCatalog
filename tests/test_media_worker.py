@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import multiprocessing as mp
 import shutil
 import time
@@ -199,7 +200,9 @@ def test_worker_main_unknown_job_reports_err(no_parent_resource_limits):
     limits = MediaWorkerLimits(timeout_s=5, memory_bytes=64 * 1024 * 1024, cpu_seconds=5)
     _worker_main("not_a_real_job", {}, conn, limits)
     assert conn.sent[0][0] == "err"
-    assert "unknown media worker job" in conn.sent[0][1]
+    body = conn.sent[0][1]
+    message = body["message"] if isinstance(body, dict) else str(body)
+    assert "unknown media worker job" in message
 
 
 def test_worker_main_missing_file_reports_err(tmp_path: Path, no_parent_resource_limits):
@@ -310,6 +313,7 @@ def test_run_media_job_unknown_job_errors():
 
 def test_run_media_job_timeout_terminates_hung_child(monkeypatch):
     """Hung child with no Pipe traffic must be terminated as timeout."""
+    monkeypatch.setenv("DEEPCATALOG_MEDIA_WORKER", "1")
 
     real_pipe = mp.get_context("spawn").Pipe
 
@@ -373,36 +377,41 @@ def test_render_document_page_pdf_via_worker(tmp_path: Path, monkeypatch):
     _require_poppler()
     monkeypatch.setenv("DEEPCATALOG_MEDIA_WORKER", "1")
     pdf = write_minimal_pdf(tmp_path / "scan.pdf", line="OCR page")
-    img = render_document_page(pdf, 1, dpi=72)
-    assert img.mode == "RGB"
-    assert img.size[0] > 0 and img.size[1] > 0
+    png = render_document_page(pdf, 1, dpi=72)
+    assert isinstance(png, (bytes, bytearray))
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 def test_render_document_page_image_via_worker(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("DEEPCATALOG_MEDIA_WORKER", "1")
-    png = write_minimal_png(tmp_path / "scan.png", size=(80, 40))
-    img = render_document_page(png, 1)
-    assert img.mode == "RGB"
-    assert img.size == (80, 40)
+    path = write_minimal_png(tmp_path / "scan.png", size=(80, 40))
+    png = render_document_page(path, 1)
+    assert isinstance(png, (bytes, bytearray))
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    with Image.open(io.BytesIO(png)) as img:
+        assert img.size == (80, 40)
 
 
 def test_render_document_page_pdf_without_worker(tmp_path: Path, monkeypatch):
     _require_poppler()
     monkeypatch.setenv("DEEPCATALOG_MEDIA_WORKER", "0")
     pdf = write_minimal_pdf(tmp_path / "scan.pdf", line="Direct poppler")
-    img = render_document_page(pdf, 1, dpi=72)
-    assert img.mode == "RGB"
+    png = render_document_page(pdf, 1, dpi=72)
+    assert isinstance(png, (bytes, bytearray))
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 def test_ai_vision_render_runs_off_event_loop(tmp_path: Path, monkeypatch):
     """Sync render sleep must not freeze the event loop (asyncio.to_thread)."""
     from deepcatalog.ocr import _ai_vision_one_page
 
-    png = write_minimal_png(tmp_path / "scan.png")
+    path = write_minimal_png(tmp_path / "scan.png")
 
     def slow_render(*_a, **_k):
         time.sleep(0.35)
-        return Image.new("RGB", (32, 24), "white")
+        buf = io.BytesIO()
+        Image.new("RGB", (32, 24), "white").save(buf, format="PNG")
+        return buf.getvalue()
 
     monkeypatch.setattr("deepcatalog.ocr.render_document_page", slow_render)
     monkeypatch.setattr(
@@ -412,7 +421,7 @@ def test_ai_vision_render_runs_off_event_loop(tmp_path: Path, monkeypatch):
 
     async def exercise() -> None:
         t0 = time.monotonic()
-        page_task = asyncio.create_task(_ai_vision_one_page(png, 1))
+        page_task = asyncio.create_task(_ai_vision_one_page(path, 1))
         await asyncio.sleep(0.05)
         mid = time.monotonic() - t0
         # Event loop stayed responsive while render slept in a worker thread.

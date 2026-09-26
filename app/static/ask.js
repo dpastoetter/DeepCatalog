@@ -377,6 +377,10 @@ export async function openDocumentFile(url) {
     await api(osUrl, { method: "POST" });
     return;
   }
+  // Desktop shell: never rely on window.open/blob (WebKit blocks it).
+  if (window.pywebview?.api) {
+    throw new Error("Could not open this file with the system viewer.");
+  }
   const win = window.open("about:blank", "_blank");
   if (!win) {
     throw new Error("Popup blocked — allow popups for this site to open documents");

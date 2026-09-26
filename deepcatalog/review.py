@@ -11,7 +11,8 @@ from typing import Any
 
 from deepcatalog import config
 from deepcatalog.pipeline.agents import file_and_persist
-from deepcatalog.settings import get_source_dir
+from deepcatalog.prompt_safety import sanitize_filing_proposal
+from deepcatalog.settings import get_category_names, get_source_dir
 from deepcatalog.tools.metadata_db import _connect, init_db
 
 # Proposal fields the human may override on approval.
@@ -224,6 +225,14 @@ def approve_review(review_id: str, overrides: dict[str, Any] | None = None) -> d
     for key, value in (overrides or {}).items():
         if key in EDITABLE_FIELDS and value is not None:
             proposal[key] = value
+
+    # Re-apply allowlist / clamps / basename after human edits — model output
+    # and overrides are both untrusted for paths and categories.
+    proposal = sanitize_filing_proposal(
+        proposal,
+        get_category_names(),
+        original_name=review.get("original_name"),
+    )
 
     filename = str(proposal.get("filename") or review["original_name"])
     doc_type = str(proposal.get("doc_type") or "other")

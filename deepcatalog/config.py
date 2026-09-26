@@ -169,9 +169,21 @@ OCR_MODE = os.getenv("DEEPCATALOG_OCR_MODE", "balanced").strip().lower() or "bal
 # Parallel vision pages for cloud providers; Ollama stays serial by default.
 OCR_CONCURRENCY = _env_int("DEEPCATALOG_OCR_CONCURRENCY", 4)
 OCR_CONCURRENCY_OLLAMA = _env_int("DEEPCATALOG_OCR_CONCURRENCY_OLLAMA", 1)
+# Classical Tesseract before AI vision (soft-fail when binary missing).
+TESSERACT_ENABLED = os.getenv("DEEPCATALOG_TESSERACT_ENABLED", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+TESSERACT_LANG = os.getenv("DEEPCATALOG_TESSERACT_LANG", "eng").strip() or "eng"
+TESSERACT_TIMEOUT = float(os.getenv("DEEPCATALOG_TESSERACT_TIMEOUT", "60"))
+TESSERACT_PSM = _env_int("DEEPCATALOG_TESSERACT_PSM", 3)
 EXTRACT_MAX_CHARS = _env_int("DEEPCATALOG_EXTRACT_MAX_CHARS", 48000)
 
 # Untrusted media hardening (upload + OCR).
+# Parent process may only check size + magic bytes; parsers run in media_worker.
+MEDIA_MAX_FILE_BYTES = _env_int("DEEPCATALOG_MEDIA_MAX_FILE_BYTES", 200 * 1024 * 1024)
 MEDIA_MAX_IMAGE_PIXELS = _env_int("DEEPCATALOG_MEDIA_MAX_IMAGE_PIXELS", 40_000_000)
 MEDIA_MAX_PDF_PAGES = _env_int("DEEPCATALOG_MEDIA_MAX_PDF_PAGES", OCR_SAFETY_MAX_PAGES)
 # ~200 inches at 72 pt/inch — rejects absurd MediaBox decompression bombs.

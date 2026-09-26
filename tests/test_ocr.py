@@ -90,6 +90,7 @@ def test_recover_image_uses_ai_ocr(tmp_path: Path, monkeypatch):
         }
 
     monkeypatch.setattr("deepcatalog.ocr._ai_vision_transcribe_indices", fake_indices)
+    monkeypatch.setattr("deepcatalog.ocr.tesseract_enabled", lambda: False)
     monkeypatch.setenv("DEEPCATALOG_OCR_MODE", "balanced")
 
     result = asyncio.run(recover_document_text(img_path))
@@ -110,6 +111,7 @@ def test_balanced_skips_vision_when_text_layer_good(tmp_path: Path, monkeypatch)
         raise AssertionError("vision should not run for good text layer")
 
     monkeypatch.setattr("deepcatalog.ocr._ai_vision_transcribe_indices", boom)
+    monkeypatch.setattr("deepcatalog.ocr.tesseract_enabled", lambda: False)
     monkeypatch.setenv("DEEPCATALOG_OCR_MODE", "balanced")
     monkeypatch.setattr(
         "deepcatalog.ocr.resolve_ocr_page_limit",
@@ -138,6 +140,7 @@ def test_maximum_always_calls_vision(tmp_path: Path, monkeypatch):
         return {i: f"vision-{i}" for i in page_indices}
 
     monkeypatch.setattr("deepcatalog.ocr._ai_vision_transcribe_indices", fake_indices)
+    monkeypatch.setattr("deepcatalog.ocr.tesseract_enabled", lambda: False)
     monkeypatch.setenv("DEEPCATALOG_OCR_MODE", "maximum")
     monkeypatch.setattr(
         "deepcatalog.ocr.resolve_ocr_page_limit",
@@ -159,6 +162,7 @@ def test_recover_falls_back_to_text_layer_when_ai_fails(tmp_path: Path, monkeypa
         raise RuntimeError("vision unavailable")
 
     monkeypatch.setattr("deepcatalog.ocr._ai_vision_transcribe_indices", failing_indices)
+    monkeypatch.setattr("deepcatalog.ocr.tesseract_enabled", lambda: False)
     monkeypatch.setenv("DEEPCATALOG_OCR_MODE", "maximum")
     monkeypatch.setattr(
         "deepcatalog.ocr.resolve_ocr_page_limit",
@@ -181,6 +185,7 @@ def test_per_page_ocr_concatenates_pages(tmp_path: Path, monkeypatch):
         return {i: f"content-{i}" for i in page_indices}
 
     monkeypatch.setattr("deepcatalog.ocr._ai_vision_transcribe_indices", fake_indices)
+    monkeypatch.setattr("deepcatalog.ocr.tesseract_enabled", lambda: False)
     monkeypatch.setattr(
         "deepcatalog.ocr.resolve_ocr_page_limit",
         lambda *_args, **_kwargs: 3,
@@ -250,8 +255,11 @@ def test_prepare_page_image_for_vision_downscales_and_jpeg_for_ollama(monkeypatc
 
     monkeypatch.setattr(config, "OCR_MAX_IMAGE_PX", 800)
     monkeypatch.setattr(config, "LLM_PROVIDER", "ollama")
-    image = Image.new("RGB", (1600, 2400), "white")
-    data, mime = prepare_page_image_for_vision(image)
+
+    big = Image.new("RGB", (1600, 2400), "white")
+    buf = io.BytesIO()
+    big.save(buf, format="PNG")
+    data, mime = prepare_page_image_for_vision(buf.getvalue())
     assert mime == "image/jpeg"
     assert len(data) > 0
     with Image.open(io.BytesIO(data)) as resized:

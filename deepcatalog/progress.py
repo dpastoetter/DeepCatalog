@@ -141,7 +141,7 @@ PIPELINE_STEP_LABELS: dict[str, str] = {
 
 PIPELINE_STEP_DESCRIPTIONS: dict[str, str] = {
     "read": "Load the scan and read any embedded PDF text layer.",
-    "ai_ocr": "Use AI vision to read each page image and recover the text.",
+    "ai_ocr": "Recover text with local Tesseract when possible, then AI vision if needed.",
     "extract": "Pull out dates, parties, amounts, and other metadata with the LLM.",
     "name": "Propose a clear filename from the extracted details.",
     "file": "Move the document into the archive folder for its category.",

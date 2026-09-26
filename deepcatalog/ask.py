@@ -78,19 +78,31 @@ def _format_documents(documents: list[dict[str, Any]]) -> str:
         return "(no metadata matches)"
     lines: list[str] = []
     for i, doc in enumerate(documents, start=1):
+        # ids/types are structured DB fields; free-text subject/parties/summary
+        # can carry second-order injection from earlier model output.
         meta = (
             f"- filename={doc.get('filename')} document_id={doc.get('id')} "
             f"doc_type={doc.get('doc_type')} doc_date={doc.get('doc_date')} "
-            f"subject={doc.get('subject')} "
-            f"counterparties={doc.get('counterparties')} "
             f"amount={doc.get('amount')} {doc.get('currency') or ''}"
+        )
+        subject = wrap_untrusted(
+            str(doc.get("subject") or "").strip(),
+            kind="evidence",
+            label=f"subject-{i}",
+        )
+        parties = wrap_untrusted(
+            str(doc.get("counterparties") or "").strip(),
+            kind="evidence",
+            label=f"parties-{i}",
         )
         summary = wrap_untrusted(
             (doc.get("summary") or "").strip(),
             kind="evidence",
             label=f"summary-{i}",
         )
-        lines.append(f"{meta}\n  summary:\n{summary}")
+        lines.append(
+            f"{meta}\n  subject:\n{subject}\n  counterparties:\n{parties}\n  summary:\n{summary}"
+        )
     return "\n".join(lines)
 
 
@@ -121,9 +133,14 @@ def _format_history(history: list[dict[str, str]]) -> str:
     if not history:
         return ""
     lines = ["Recent conversation (context only — not archive evidence):"]
-    for turn in history:
+    for i, turn in enumerate(history, start=1):
         label = "User" if turn["role"] == "user" else "Assistant"
-        lines.append(f"{label}: {turn['content']}")
+        body = wrap_untrusted(
+            turn["content"],
+            kind="evidence",
+            label=f"history-{label.lower()}-{i}",
+        )
+        lines.append(f"{label}:\n{body}")
     return "\n".join(lines) + "\n\n"
 
 

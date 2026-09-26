@@ -50,7 +50,11 @@ class BatchSetting(BaseModel):
 class ReviewSetting(BaseModel):
     require_approval: bool = Field(
         default=True,
-        description="Hold proposed filings for human approval before writing.",
+        description=(
+            "Hold proposed filings for human approval before writing. "
+            "Recommended: model classification from document text is untrusted; "
+            "approval is the gate for consequential archive moves."
+        ),
     )
 
 
@@ -58,6 +62,10 @@ class OcrSetting(BaseModel):
     mode: Literal["fast", "balanced", "maximum"] = Field(
         default="balanced",
         description="OCR accuracy mode: fast | balanced | maximum.",
+    )
+    tesseract: bool = Field(
+        default=True,
+        description="Try classical Tesseract before AI vision when available.",
     )
 
 

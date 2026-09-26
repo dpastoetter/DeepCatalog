@@ -15,6 +15,7 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
+from typing import Any, cast
 from urllib.parse import unquote, urlparse
 
 import httpx
@@ -29,7 +30,7 @@ from deepcatalog.local_security import (
     ssl_cert_paths,
     sync_configured_bind,
 )
-from deepcatalog.ollama_setup import host_subprocess_env
+from deepcatalog.ollama_setup import host_desktop_env, host_subprocess_env
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_WIDTH = 1280
@@ -174,7 +175,8 @@ def _start_uvicorn(host: str, port: int) -> uvicorn.Server:
 
     def _run() -> None:
         # uvicorn.Server.run() installs its own signal handlers; disable in thread.
-        server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
+        # cast: stubs omit install_signal_handlers on Server.
+        cast(Any, server).install_signal_handlers = lambda: None
         server.run()
 
     thread = threading.Thread(target=_run, name="deepcatalog-uvicorn", daemon=True)
@@ -736,19 +738,24 @@ def open_chromium_app_window(
 
 
 def _open_in_browser(url: str) -> None:
-    env = host_subprocess_env()
+    env = host_desktop_env()
     which_path = env.get("PATH")
-    opener = shutil.which("xdg-open", path=which_path) or shutil.which("gio", path=which_path)
-    if opener:
-        subprocess.Popen(  # noqa: S603
-            [opener, url] if opener.endswith("xdg-open") else [opener, "open", url],
-            start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=env,
-        )
+    gio = shutil.which("gio", path=which_path)
+    xdg = shutil.which("xdg-open", path=which_path)
+    if gio:
+        argv = [gio, "open", url]
+    elif xdg:
+        argv = [xdg, url]
+    else:
+        webbrowser.open(url)
         return
-    webbrowser.open(url)
+    subprocess.Popen(  # noqa: S603
+        argv,
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
 
 
 def desktop_prefers_dark() -> bool:

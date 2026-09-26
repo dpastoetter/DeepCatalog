@@ -6,6 +6,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -68,6 +69,15 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 logger = logging.getLogger(__name__)
 
 
+def _secure(request: Request, response: HTMLResponse | JSONResponse | Any) -> Any:
+    """Attach browser hardening headers, including opt-in HSTS when appropriate."""
+    return apply_browser_security_headers(
+        response,
+        https=request_is_https(request),
+        host_header=request.headers.get("host"),
+    )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     ensure_data_dirs()
@@ -106,11 +116,12 @@ async def security_boundary(request: Request, call_next):
 
     if path.startswith("/api/") or path == "/" or path.startswith("/static/"):
         if not host_header_allowed(request.headers.get("host")):
-            return apply_browser_security_headers(
+            return _secure(
+                request,
                 JSONResponse(
                     status_code=400,
                     content={"detail": "invalid Host header"},
-                )
+                ),
             )
 
     tcp_peer = peer_host(request)
@@ -128,11 +139,12 @@ async def security_boundary(request: Request, call_next):
             x_forwarded_proto=request.headers.get("x-forwarded-proto"),
         )
     ):
-        return apply_browser_security_headers(
+        return _secure(
+            request,
             JSONResponse(
                 status_code=403,
                 content={"detail": "HTTPS required"},
-            )
+            ),
         )
 
     needs_auth = path.startswith("/api/") and not path_is_auth_exempt(path)
@@ -141,7 +153,8 @@ async def security_boundary(request: Request, call_next):
         host_header=request.headers.get("host"),
     ):
         if not get_api_token():
-            return apply_browser_security_headers(
+            return _secure(
+                request,
                 JSONResponse(
                     status_code=403,
                     content={
@@ -151,23 +164,25 @@ async def security_boundary(request: Request, call_next):
                             "set DEEPCATALOG_SINGLE_USER=1 only on a dedicated machine)"
                         )
                     },
-                )
+                ),
             )
         limiter = get_auth_rate_limiter()
         client_ip = rate_limit_ip(request)
         allowed, retry_after = limiter.check_api_auth(client_ip)
         if not allowed:
             log_rate_limited(client_ip, path, retry_after)
-            return apply_browser_security_headers(
+            return _secure(
+                request,
                 JSONResponse(
                     status_code=429,
                     content={"detail": RATE_LIMIT_DETAIL},
                     headers=rate_limit_response_headers(retry_after),
-                )
+                ),
             )
         if not request_has_valid_token(request):
             limiter.record_api_auth_failure(client_ip, path)
-            return apply_browser_security_headers(
+            return _secure(
+                request,
                 JSONResponse(
                     status_code=401,
                     content={
@@ -177,7 +192,7 @@ async def security_boundary(request: Request, call_next):
                             f"POST /api/auth/session (cookie {COOKIE_NAME})"
                         )
                     },
-                )
+                ),
             )
 
     if (
@@ -185,19 +200,20 @@ async def security_boundary(request: Request, call_next):
         and path.startswith("/api/")
         and not request_passes_csrf(request)
     ):
-        return apply_browser_security_headers(
+        return _secure(
+            request,
             JSONResponse(
                 status_code=403,
                 content={
                     "detail": (f"missing {CSRF_HEADER_NAME} header — cross-site request blocked")
                 },
-            )
+            ),
         )
 
     response = await call_next(request)
     if path == "/" or path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
-    response = apply_browser_security_headers(response)
+    response = _secure(request, response)
     if request.query_params.get("desktop") == "1":
         response.headers["Content-Security-Policy"] = DESKTOP_CONTENT_SECURITY_POLICY
     return response

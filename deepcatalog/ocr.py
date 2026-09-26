@@ -4,16 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import io
 import logging
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-from PIL import Image
-from pypdf import PdfReader
 
 from deepcatalog import config
 from deepcatalog.job_control import (
@@ -26,11 +22,12 @@ from deepcatalog.media_worker import (
     MediaWorkerError,
     extract_pdf_page_texts_isolated,
     load_image_rgb_png_isolated,
-    media_worker_enabled,
+    prepare_png_for_vision_isolated,
     render_pdf_page_png_isolated,
 )
 from deepcatalog.progress import emit_step, llm_busy_detail, step_label
 from deepcatalog.prompt_safety import wrap_untrusted
+from deepcatalog.tesseract_ocr import ocr_png_bytes, tesseract_enabled
 from deepcatalog.tools.filesystem import (
     IMAGE_SUFFIXES,
     PDF_SUFFIXES,
@@ -149,10 +146,8 @@ def page_uses_text_layer(page_text: str, mode: str) -> bool:
 
 
 def _extract_pdf_page_texts(path: Path) -> list[str]:
-    if media_worker_enabled():
-        return extract_pdf_page_texts_isolated(path)
-    reader = PdfReader(str(path), strict=False)
-    return [(page.extract_text() or "").strip() for page in reader.pages]
+    """Extract per-page text via the media-worker boundary (never pypdf here)."""
+    return extract_pdf_page_texts_isolated(path)
 
 
 def _extract_pdf_text_layer(path: Path) -> tuple[str, int | None]:
@@ -188,13 +183,13 @@ def resolve_ocr_page_limit(
     return min(effective, config.OCR_SAFETY_MAX_PAGES)
 
 
-def render_document_page(
+def render_document_page_png(
     path: Path,
     page_index: int,
     *,
     dpi: int | None = None,
-) -> Image.Image:
-    """Rasterize a single PDF page or load an image file (1-based page index)."""
+) -> bytes:
+    """Rasterize a single PDF page or load an image file as RGB PNG bytes."""
     render_dpi = dpi if dpi is not None else config.OCR_DPI
     suffix = path.suffix.lower()
     # Re-validate before native decode/render (inbox files may predate upload checks).
@@ -203,34 +198,22 @@ def render_document_page(
     if suffix in IMAGE_SUFFIXES:
         if page_index != 1:
             raise ValueError("image files have only one page")
-        if media_worker_enabled():
-            png = load_image_rgb_png_isolated(path)
-            with Image.open(io.BytesIO(png)) as img:
-                return img.convert("RGB")
-        with Image.open(path) as img:
-            return img.convert("RGB")
+        return load_image_rgb_png_isolated(path)
 
     if suffix not in PDF_SUFFIXES:
         raise ValueError(f"unsupported file type for OCR: {suffix}")
 
-    if media_worker_enabled():
-        png = render_pdf_page_png_isolated(path, page_index, dpi=render_dpi)
-        with Image.open(io.BytesIO(png)) as img:
-            return img.convert("RGB") if img.mode != "RGB" else img.copy()
+    return render_pdf_page_png_isolated(path, page_index, dpi=render_dpi)
 
-    from pdf2image import convert_from_path
 
-    images = convert_from_path(
-        str(path),
-        dpi=render_dpi,
-        first_page=page_index,
-        last_page=page_index,
-        fmt="png",
-    )
-    if not images:
-        raise RuntimeError(f"failed to render page {page_index}")
-    img = images[0]
-    return img.convert("RGB") if img.mode != "RGB" else img
+def render_document_page(
+    path: Path,
+    page_index: int,
+    *,
+    dpi: int | None = None,
+) -> bytes:
+    """Rasterize one page to RGB PNG bytes (1-based index)."""
+    return render_document_page_png(path, page_index, dpi=dpi)
 
 
 def render_document_images(
@@ -238,18 +221,12 @@ def render_document_images(
     *,
     max_pages: int | None = None,
     dpi: int | None = None,
-) -> list[Image.Image]:
-    """Rasterize up to max_pages from a PDF or load an image for vision OCR."""
+) -> list[bytes]:
+    """Rasterize up to max_pages from a PDF or load an image as PNG byte pages."""
     limit = max_pages if max_pages is not None else resolve_ocr_page_limit(path)
     if limit <= 0:
         return []
-    return [render_document_page(path, i, dpi=dpi) for i in range(1, limit + 1)]
-
-
-def _image_to_png_bytes(image: Image.Image) -> bytes:
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
-    return buf.getvalue()
+    return [render_document_page_png(path, i, dpi=dpi) for i in range(1, limit + 1)]
 
 
 def resolve_ocr_page_timeout() -> float:
@@ -266,31 +243,18 @@ def _ollama_vision_options() -> dict[str, int]:
     }
 
 
-def prepare_page_image_for_vision(image: Image.Image) -> tuple[bytes, str]:
+def prepare_page_image_for_vision(png_bytes: bytes) -> tuple[bytes, str]:
     """
-    Normalize a rendered page for multimodal OCR.
+    Normalize a rendered page PNG for multimodal OCR.
 
     Downscales large scans and uses JPEG for Ollama to keep CPU inference tractable.
+    PIL work stays inside media_worker.
     """
-    img = image.convert("RGB")
     max_px = max(256, int(config.OCR_MAX_IMAGE_PX))
-    if config.LLM_PROVIDER == "ollama":
+    as_jpeg = config.LLM_PROVIDER == "ollama"
+    if as_jpeg:
         max_px = min(max_px, max(256, int(config.OLLAMA_OCR_MAX_IMAGE_PX)))
-    width, height = img.size
-    long_edge = max(width, height)
-    if long_edge > max_px:
-        scale = max_px / long_edge
-        img = img.resize(
-            (max(1, int(width * scale)), max(1, int(height * scale))),
-            Image.Resampling.LANCZOS,
-        )
-
-    buf = io.BytesIO()
-    if config.LLM_PROVIDER == "ollama":
-        img.save(buf, format="JPEG", quality=80, optimize=True)
-        return buf.getvalue(), "image/jpeg"
-    img.save(buf, format="PNG")
-    return buf.getvalue(), "image/png"
+    return prepare_png_for_vision_isolated(png_bytes, max_px=max_px, as_jpeg=as_jpeg)
 
 
 _VISION_INSTRUCTIONS = (
@@ -309,13 +273,17 @@ async def _ai_vision_one_page(
     page_index: int,
     *,
     hint: str = "",
+    pre_rendered: bytes | None = None,
 ) -> str:
     """Transcribe a single page with a multimodal LLM call."""
     from deepcatalog.llm import complete_with_images
 
     raise_if_cancelled()
-    img = await asyncio.to_thread(render_document_page, path, page_index)
-    image_bytes, mime_type = prepare_page_image_for_vision(img)
+    if pre_rendered is not None:
+        png = pre_rendered
+    else:
+        png = await asyncio.to_thread(render_document_page, path, page_index)
+    image_bytes, mime_type = prepare_page_image_for_vision(png)
     prompt = "Transcribe this document page image. Output plain text only."
     if hint.strip():
         prompt += (
@@ -340,6 +308,7 @@ async def _ai_vision_transcribe_indices(
     page_indices: list[int],
     *,
     page_hints: dict[int, str] | None = None,
+    page_images: dict[int, bytes] | None = None,
     filename: str = "",
     total_pages: int | None = None,
 ) -> dict[int, str]:
@@ -347,6 +316,7 @@ async def _ai_vision_transcribe_indices(
     if not page_indices:
         return {}
     hints = page_hints or {}
+    images = page_images or {}
     total = total_pages or max(page_indices)
     concurrency = resolve_ocr_concurrency()
     sem = asyncio.Semaphore(concurrency)
@@ -368,7 +338,12 @@ async def _ai_vision_transcribe_indices(
                     ),
                     filename=filename,
                 )
-            text = await _ai_vision_one_page(path, page_index, hint=hints.get(page_index, ""))
+            text = await _ai_vision_one_page(
+                path,
+                page_index,
+                hint=hints.get(page_index, ""),
+                pre_rendered=images.get(page_index),
+            )
             async with lock:
                 results[page_index] = text
                 done += 1
@@ -384,6 +359,67 @@ async def _ai_vision_transcribe_indices(
 
     await asyncio.gather(*(one(i) for i in page_indices))
     return results
+
+
+async def _tesseract_transcribe_indices(
+    path: Path,
+    page_indices: list[int],
+    *,
+    mode: str,
+    filename: str = "",
+    total_pages: int | None = None,
+) -> tuple[dict[int, str], dict[int, bytes], list[int]]:
+    """
+    Classical OCR for pages that need transcription.
+
+    Returns (kept_texts, rendered_images_for_leftovers, pages_still_needing_vision).
+    Rendered images for leftovers are reused by AI vision to avoid a second Poppler pass.
+    """
+    if not page_indices:
+        return {}, {}, []
+
+    total = total_pages or max(page_indices)
+    kept: dict[int, str] = {}
+    leftover_images: dict[int, bytes] = {}
+    need_vision: list[int] = []
+    done = 0
+
+    for page_index in page_indices:
+        raise_if_cancelled()
+        await emit_step(
+            "ai_ocr",
+            label=step_label("ai_ocr"),
+            status="running",
+            detail=f"Tesseract page {page_index}/{total} ({done}/{len(page_indices)} done)…",
+            filename=filename,
+        )
+        try:
+            img = await asyncio.to_thread(render_document_page, path, page_index)
+        except Exception as exc:  # noqa: BLE001 — fall through to vision with fresh render
+            logger.info("Render for Tesseract failed on page %s: %s", page_index, exc)
+            need_vision.append(page_index)
+            done += 1
+            continue
+
+        text = await asyncio.to_thread(ocr_png_bytes, img)
+        if text and page_uses_text_layer(text, mode):
+            kept[page_index] = text
+        else:
+            leftover_images[page_index] = img
+            need_vision.append(page_index)
+        done += 1
+        await emit_step(
+            "ai_ocr",
+            label=step_label("ai_ocr"),
+            status="running",
+            detail=(
+                f"Tesseract {done}/{len(page_indices)} pages "
+                f"({len(kept)} kept, {len(need_vision)} need vision)"
+            ),
+            filename=filename,
+        )
+
+    return kept, leftover_images, need_vision
 
 
 async def _ai_vision_transcribe_pages(
@@ -411,8 +447,10 @@ async def recover_document_text(path: str | Path) -> dict[str, Any]:
     Recover plain text for ingest (adaptive).
 
     For each PDF page: use the embedded text layer when quality is good for the
-    active mode (fast / balanced); otherwise run AI vision OCR. Image files always
-    use vision. Cloud providers run vision pages with bounded concurrency.
+    active mode (fast / balanced); otherwise try classical Tesseract, then AI
+    vision OCR. Image files skip the text layer. ``maximum`` mode always uses
+    vision (no Tesseract). Cloud providers run vision pages with bounded
+    concurrency.
     """
     file_path = Path(path).expanduser().resolve()
     if not file_path.exists() or not file_path.is_file():
@@ -519,7 +557,7 @@ async def recover_document_text(path: str | Path) -> dict[str, Any]:
 
     page_parts: dict[int, str] = {}
     pages_from_layer: list[int] = []
-    pages_need_vision: list[int] = []
+    pages_need_ocr: list[int] = []
 
     for page_index in range(1, page_limit + 1):
         layer = page_layer_texts[page_index - 1] if page_index - 1 < len(page_layer_texts) else ""
@@ -527,73 +565,134 @@ async def recover_document_text(path: str | Path) -> dict[str, Any]:
             page_parts[page_index] = layer
             pages_from_layer.append(page_index)
         else:
-            pages_need_vision.append(page_index)
+            pages_need_ocr.append(page_index)
 
     raise_if_cancelled()
+    pages_from_tesseract: list[int] = []
+    pages_need_vision: list[int] = list(pages_need_ocr)
+    page_images: dict[int, bytes] = {}
     vision_errors: list[str] = []
     vision_succeeded = 0
-    if not pages_need_vision:
+    tesseract_ran = False
+
+    if not pages_need_ocr:
         await emit_step(
             "ai_ocr",
             label=step_label("ai_ocr"),
             status="skipped",
-            detail=(
-                f"Mode {mode}: all {len(pages_from_layer)} page(s) from text layer (no vision)"
-            ),
+            detail=(f"Mode {mode}: all {len(pages_from_layer)} page(s) from text layer (no OCR)"),
             filename=filename,
         )
     else:
-        await emit_step(
-            "ai_ocr",
-            label=step_label("ai_ocr"),
-            status="running",
-            detail=(
-                f"Mode {mode}: {len(pages_from_layer)} page(s) from text layer, "
-                f"{len(pages_need_vision)} need vision"
-            ),
-            filename=filename,
-        )
-        try:
-            hints = {
-                i: page_layer_texts[i - 1]
-                for i in pages_need_vision
-                if i - 1 < len(page_layer_texts) and page_layer_texts[i - 1]
-            }
-            vision_map = await _ai_vision_transcribe_indices(
-                file_path,
-                pages_need_vision,
-                page_hints=hints,
+        use_tesseract = mode != "maximum" and tesseract_enabled()
+        if use_tesseract:
+            tesseract_ran = True
+            await emit_step(
+                "ai_ocr",
+                label=step_label("ai_ocr"),
+                status="running",
+                detail=(
+                    f"Mode {mode}: {len(pages_from_layer)} page(s) from text layer, "
+                    f"{len(pages_need_ocr)} trying Tesseract…"
+                ),
                 filename=filename,
-                total_pages=page_count,
             )
-            for page_index in pages_need_vision:
-                text = (vision_map.get(page_index) or "").strip()
-                if text:
+            try:
+                kept, leftover_images, still_need = await _tesseract_transcribe_indices(
+                    file_path,
+                    pages_need_ocr,
+                    mode=mode,
+                    filename=filename,
+                    total_pages=page_count,
+                )
+                for page_index, text in kept.items():
                     page_parts[page_index] = text
-                    vision_succeeded += 1
-                elif page_index - 1 < len(page_layer_texts) and page_layer_texts[page_index - 1]:
-                    page_parts[page_index] = page_layer_texts[page_index - 1]
-            steps.append(
-                {
-                    "method": "ai_vision",
-                    "pages_ocrd": len(pages_need_vision),
-                    "pages_with_text": vision_succeeded,
-                    "chars": sum(len(vision_map.get(i) or "") for i in pages_need_vision),
-                    "concurrency": resolve_ocr_concurrency(),
-                }
+                    pages_from_tesseract.append(page_index)
+                page_images = leftover_images
+                pages_need_vision = still_need
+                steps.append(
+                    {
+                        "method": "tesseract",
+                        "pages_ocrd": len(pages_need_ocr),
+                        "pages_kept": len(pages_from_tesseract),
+                        "chars": sum(len(page_parts[i]) for i in pages_from_tesseract),
+                    }
+                )
+            except FileCancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — soft-fail entire tess pass
+                logger.warning("Tesseract pass failed for %s: %s", file_path, _exc_detail(exc))
+                steps.append({"method": "tesseract", "error": _exc_detail(exc)})
+                pages_need_vision = list(pages_need_ocr)
+                page_images = {}
+
+        if not pages_need_vision:
+            await emit_step(
+                "ai_ocr",
+                label=step_label("ai_ocr"),
+                status="done",
+                detail=(
+                    f"Mode {mode}: layer {len(pages_from_layer)} / "
+                    f"tesseract {len(pages_from_tesseract)} (no vision)"
+                ),
+                filename=filename,
             )
-        except FileCancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            detail = _exc_detail(exc)
-            logger.warning("AI vision OCR failed for %s: %s", file_path, detail)
-            vision_errors.append(detail)
-            steps.append({"method": "ai_vision", "error": detail})
-            for page_index in pages_need_vision:
-                if page_index in page_parts:
-                    continue
-                if page_index - 1 < len(page_layer_texts) and page_layer_texts[page_index - 1]:
-                    page_parts[page_index] = page_layer_texts[page_index - 1]
+        else:
+            await emit_step(
+                "ai_ocr",
+                label=step_label("ai_ocr"),
+                status="running",
+                detail=(
+                    f"Mode {mode}: layer {len(pages_from_layer)} / "
+                    f"tesseract {len(pages_from_tesseract)} / "
+                    f"{len(pages_need_vision)} need vision"
+                ),
+                filename=filename,
+            )
+            try:
+                hints = {
+                    i: page_layer_texts[i - 1]
+                    for i in pages_need_vision
+                    if i - 1 < len(page_layer_texts) and page_layer_texts[i - 1]
+                }
+                vision_map = await _ai_vision_transcribe_indices(
+                    file_path,
+                    pages_need_vision,
+                    page_hints=hints,
+                    page_images=page_images,
+                    filename=filename,
+                    total_pages=page_count,
+                )
+                for page_index in pages_need_vision:
+                    text = (vision_map.get(page_index) or "").strip()
+                    if text:
+                        page_parts[page_index] = text
+                        vision_succeeded += 1
+                    elif (
+                        page_index - 1 < len(page_layer_texts) and page_layer_texts[page_index - 1]
+                    ):
+                        page_parts[page_index] = page_layer_texts[page_index - 1]
+                steps.append(
+                    {
+                        "method": "ai_vision",
+                        "pages_ocrd": len(pages_need_vision),
+                        "pages_with_text": vision_succeeded,
+                        "chars": sum(len(vision_map.get(i) or "") for i in pages_need_vision),
+                        "concurrency": resolve_ocr_concurrency(),
+                    }
+                )
+            except FileCancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                detail = _exc_detail(exc)
+                logger.warning("AI vision OCR failed for %s: %s", file_path, detail)
+                vision_errors.append(detail)
+                steps.append({"method": "ai_vision", "error": detail})
+                for page_index in pages_need_vision:
+                    if page_index in page_parts:
+                        continue
+                    if page_index - 1 < len(page_layer_texts) and page_layer_texts[page_index - 1]:
+                        page_parts[page_index] = page_layer_texts[page_index - 1]
 
     ordered = [
         f"[Page {i}]\n{page_parts[i]}" for i in range(1, page_limit + 1) if page_parts.get(i)
@@ -601,35 +700,49 @@ async def recover_document_text(path: str | Path) -> dict[str, Any]:
     text = "\n\n".join(ordered).strip()
     quality = assess_text_quality(text)
 
-    if pages_from_layer and not pages_need_vision:
+    vision_pages_count = len(pages_need_vision) if pages_need_ocr else 0
+    vision_ok = vision_pages_count > 0 and not vision_errors
+    has_tess = bool(pages_from_tesseract)
+    has_layer = bool(pages_from_layer)
+
+    if not pages_need_ocr:
         method = "pdf_text_layer"
         used_ai = False
-    elif pages_need_vision and not pages_from_layer and not vision_errors:
+    elif vision_ok and not has_layer and not has_tess:
         method = "ai_vision"
         used_ai = True
-    elif pages_from_layer and pages_need_vision and not vision_errors:
-        method = "adaptive"
-        used_ai = True
-    elif text and vision_errors:
+    elif has_tess and not has_layer and vision_pages_count == 0:
+        method = "tesseract"
+        used_ai = False
+    elif vision_errors and text and vision_succeeded == 0:
+        # Maximum mode never "keeps" the layer up front, but we still fall back
+        # to embedded text when vision fails — report that as a layer fallback.
         method = "pdf_text_layer_fallback"
         used_ai = False
     elif text:
         method = "adaptive"
-        used_ai = vision_succeeded > 0
+        used_ai = vision_ok or vision_succeeded > 0
     else:
         method = "none"
         used_ai = False
 
+    if vision_succeeded > 0:
+        used_ai = True
+    elif not vision_ok:
+        used_ai = False
+
     detail = (
         f"{page_limit} page{'s' if page_limit != 1 else ''} · {quality.chars} chars · "
-        f"layer {len(pages_from_layer)} / vision {len(pages_need_vision)} · {mode}"
+        f"layer {len(pages_from_layer)} / tesseract {len(pages_from_tesseract)} / "
+        f"vision {vision_pages_count} · {mode}"
     )
-    if pages_need_vision:
+    if pages_need_ocr:
+        err_suffix = f" · vision error: {vision_errors[0]}" if vision_errors else ""
         await emit_step(
             "ai_ocr",
             label=step_label("ai_ocr"),
             status="done" if text else "error",
-            detail=detail if not vision_errors else f"{detail} · vision error: {vision_errors[0]}",
+            detail=detail + err_suffix,
             filename=filename,
         )
 
@@ -644,10 +757,16 @@ async def recover_document_text(path: str | Path) -> dict[str, Any]:
         "page_count": page_count,
         "ocr_mode": mode,
         "pages_from_text_layer": len(pages_from_layer),
-        "pages_from_vision": len(pages_need_vision),
+        "pages_from_tesseract": len(pages_from_tesseract),
+        "pages_from_vision": vision_pages_count,
         "steps": steps,
         "used_ai_ocr": used_ai,
-        "note": None if text.strip() else "No usable text recovered from text layer or AI OCR.",
+        "tesseract_ran": tesseract_ran,
+        "note": (
+            None
+            if text.strip()
+            else "No usable text recovered from text layer, Tesseract, or AI OCR."
+        ),
     }
 
 

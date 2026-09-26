@@ -1,0 +1,58 @@
+# Ban untrusted PDF/image parser imports outside the media worker.
+#
+# Architectural rule: only deepcatalog/media_worker.py may import pypdf,
+# pdf2image, or PIL/Pillow for scan media. Parent process code uses magic-byte
+# + size checks (media_validate) and calls media_worker helpers.
+#
+#   semgrep --config .semgrep/media-parser-boundary.yml deepcatalog
+
+rules:
+  - id: deepcatalog-no-pypdf-outside-media-worker
+    languages: [python]
+    severity: ERROR
+    message: >
+      Do not import pypdf outside deepcatalog/media_worker.py. Untrusted PDF
+      parsing must run in the resource-limited media worker.
+    patterns:
+      - pattern-either:
+          - pattern: import pypdf
+          - pattern: import pypdf.$X
+          - pattern: from pypdf import ...
+          - pattern: from pypdf.$X import ...
+    paths:
+      exclude:
+        - deepcatalog/media_worker.py
+        - tests/**
+
+  - id: deepcatalog-no-pdf2image-outside-media-worker
+    languages: [python]
+    severity: ERROR
+    message: >
+      Do not import pdf2image outside deepcatalog/media_worker.py. Poppler
+      rendering of untrusted PDFs must run in the media worker.
+    patterns:
+      - pattern-either:
+          - pattern: import pdf2image
+          - pattern: from pdf2image import ...
+    paths:
+      exclude:
+        - deepcatalog/media_worker.py
+        - tests/**
+
+  - id: deepcatalog-no-pil-outside-media-worker
+    languages: [python]
+    severity: ERROR
+    message: >
+      Do not import PIL/Pillow outside deepcatalog/media_worker.py. Untrusted
+      image decode must run in the media worker (trusted PNG bytes may be
+      prepared there too).
+    patterns:
+      - pattern-either:
+          - pattern: import PIL
+          - pattern: import PIL.$X
+          - pattern: from PIL import ...
+          - pattern: from PIL.$X import ...
+    paths:
+      exclude:
+        - deepcatalog/media_worker.py
+        - tests/**

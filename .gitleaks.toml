@@ -1,11 +1,12 @@
-# Keep default gitleaks rules; only skip fixtures / lockfiles / example env.
+# Keep default gitleaks rules; only skip fixtures / lockfiles / example env /
+# screenshot binaries (not the whole docs/ tree).
 title = "DeepCatalog"
 
 [extend]
 useDefault = true
 
 [allowlist]
-description = "Test fixtures, lockfiles, example env, and the public release verify key"
+description = "Test fixtures, lockfiles, example env, screenshot binaries, and the public release verify key"
 paths = [
   '''(^|/)tests/''',
   '''(^|/)node_modules/''',
@@ -13,7 +14,8 @@ paths = [
   '''package-lock\.json$''',
   '''constraints\.txt$''',
   '''\.env\.example$''',
-  '''(^|/)docs/''',
+  # Mockup screenshots only — keep docs/deck HTML/CSS and any future text under scan.
+  '''(^|/)docs/screenshots/.*\.(png|jpe?g|webp|gif)$''',
 ]
 # Embedded Ed25519 *public* key for release-manifest verification (not a secret).
 # Listed by value so historical commits that introduced it are also allowed.

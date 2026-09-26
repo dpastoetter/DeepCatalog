@@ -187,9 +187,11 @@ def test_load_settings_migrates_missing_review_and_ocr(isolated_settings):
     settings = load_settings()
     assert settings["review"]["require_approval"] is True
     assert settings["ocr"]["mode"] == "balanced"
+    assert settings["ocr"]["tesseract"] is True
     on_disk = json.loads(path.read_text(encoding="utf-8"))
     assert on_disk["review"]["require_approval"] is True
     assert on_disk["ocr"]["mode"] == "balanced"
+    assert on_disk["ocr"]["tesseract"] is True
 
 
 def test_load_settings_keeps_require_approval_false_when_ocr_missing(
@@ -214,6 +216,7 @@ def test_load_settings_keeps_require_approval_false_when_ocr_missing(
     on_disk = json.loads(path.read_text(encoding="utf-8"))
     assert on_disk["review"]["require_approval"] is False
     assert on_disk["ocr"]["mode"] == "balanced"
+    assert on_disk["ocr"]["tesseract"] is True
 
 
 def test_put_require_approval_false_persists_to_disk(isolated_settings):

@@ -11,8 +11,10 @@ import {
   refreshHealth,
   refreshOllamaStatus,
   renderOllamaStatus,
+  peekOllamaStatus,
   setProviderUi,
   setText,
+  syncOllamaPullButton,
   toast,
 } from "./api.js";
 import { areAskExamplesEnabled, setAskExamplesEnabled } from "./ask.js";
@@ -164,12 +166,13 @@ function collectSetupPayload() {
   );
   const require_approval = document.getElementById("setup-require-approval").checked;
   const ocr_mode = document.getElementById("setup-ocr-mode")?.value || "balanced";
+  const ocr_tesseract = document.getElementById("setup-ocr-tesseract")?.checked ?? true;
   return {
     source_dir,
     categories,
     batch: { poll_interval_seconds },
     review: { require_approval },
-    ocr: { mode: ocr_mode },
+    ocr: { mode: ocr_mode, tesseract: ocr_tesseract },
   };
 }
 
@@ -185,6 +188,8 @@ function applySettingsToForm(settings) {
   const ocrMode = (settings.ocr || {}).mode || "balanced";
   const ocrSelect = document.getElementById("setup-ocr-mode");
   if (ocrSelect) ocrSelect.value = ocrMode;
+  const ocrTess = document.getElementById("setup-ocr-tesseract");
+  if (ocrTess) ocrTess.checked = (settings.ocr || {}).tesseract ?? true;
   setSetupStatus(setupStatusLine(settings), "ok");
 }
 
@@ -195,11 +200,13 @@ export function setupStatusLine(settings) {
   const scan =
     Number(interval) > 0 ? `scans every ${interval}s` : "manual scan only";
   const ocrMode = (settings.ocr || {}).mode || "balanced";
+  const ocrTess = (settings.ocr || {}).tesseract ?? true;
   const reviewMode =
     (settings.review || {}).require_approval === false
       ? "auto-file"
       : "review required";
-  return `Source: ${settings.source_dir || "—"} · ${catCount} categor${catCount === 1 ? "y" : "ies"} · ${scan} · OCR ${ocrMode} · ${reviewMode}`;
+  const tessNote = ocrTess ? " · Tesseract" : "";
+  return `Source: ${settings.source_dir || "—"} · ${catCount} categor${catCount === 1 ? "y" : "ies"} · ${scan} · OCR ${ocrMode}${tessNote} · ${reviewMode}`;
 }
 
 export async function refreshSetup() {
@@ -500,16 +507,27 @@ export function settingsShellHtml() {
               <h3>OCR accuracy</h3>
               <p class="fine">
                 How aggressively to reuse a PDF’s embedded text versus calling AI vision OCR.
-                Scanned pages without a usable text layer still use vision in every mode.
+                Scanned pages without a usable text layer try local Tesseract first (when installed),
+                then fall back to AI vision if quality is poor. Maximum mode always uses vision.
               </p>
               <label class="field">
                 <span>Mode</span>
                 <select id="setup-ocr-mode">
-                  <option value="fast">Fast — use embedded text when present; vision only if nearly empty</option>
-                  <option value="balanced" selected>Balanced — use good embedded text; vision for weak/garbled pages</option>
-                  <option value="maximum">Maximum — always vision OCR every page</option>
+                  <option value="fast">Fast — use embedded text when present; OCR only if nearly empty</option>
+                  <option value="balanced" selected>Balanced — use good embedded text; OCR for weak/garbled pages</option>
+                  <option value="maximum">Maximum — always AI vision OCR every page</option>
                 </select>
               </label>
+              <label class="check-field">
+                <input type="checkbox" id="setup-ocr-tesseract" checked />
+                <span>Prefer local Tesseract before AI vision (faster; needs the <code>tesseract</code> binary)</span>
+              </label>
+              <p class="fine">
+                Install: Fedora <code>tesseract tesseract-langpack-eng</code> ·
+                Debian/Ubuntu <code>tesseract-ocr tesseract-ocr-eng</code> ·
+                macOS <code>brew install tesseract</code>. Extra languages via
+                <code>DEEPCATALOG_TESSERACT_LANG</code> (e.g. <code>eng+deu</code>).
+              </p>
             </div>
 
             <div class="setup-batch">
@@ -518,7 +536,13 @@ export function settingsShellHtml() {
                 <input type="checkbox" id="setup-require-approval" checked />
                 <span>Require approval before filing — every proposal waits in Review until you approve it</span>
               </label>
-              <p class="fine">When off, documents are filed automatically. Suspected duplicates always stop for review.</p>
+              <p class="fine">
+                Keep this on for consequential filing. Document text can steer the model’s
+                category or metadata; code still allowlists categories and confines paths,
+                but a human check is the last gate before archive writes.
+                When off, non-duplicate documents file automatically. Suspected duplicates
+                always stop for review.
+              </p>
             </div>
           </div>
         </section>
@@ -781,13 +805,24 @@ export function initSettings() {
       toast(String(err.message || err), "error");
       refreshOllamaStatus().catch(() => {});
     } finally {
-      if (pullBtn) pullBtn.disabled = false;
+      syncOllamaPullButton();
     }
   });
 
   document.getElementById("ollama-refresh")?.addEventListener("click", () => {
     refreshOllamaStatus().catch((err) => toast(String(err.message || err), "error"));
   });
+
+  const onOllamaModelChange = () => {
+    const snap = peekOllamaStatus();
+    if (snap) {
+      renderOllamaStatus(snap);
+      return;
+    }
+    syncOllamaPullButton();
+  };
+  document.getElementById("ollama-chat-model")?.addEventListener("change", onOllamaModelChange);
+  document.getElementById("ollama-embed-model")?.addEventListener("change", onOllamaModelChange);
 
   document.getElementById("ollama-unload")?.addEventListener("click", async () => {
     const btn = document.getElementById("ollama-unload");

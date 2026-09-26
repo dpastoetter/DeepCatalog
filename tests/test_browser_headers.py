@@ -80,3 +80,40 @@ def test_error_responses_also_carry_headers(isolated_data, monkeypatch):
     assert resp.status_code == 401
     assert resp.headers.get("Content-Security-Policy") == CONTENT_SECURITY_POLICY
     assert resp.headers.get("X-Frame-Options") == "DENY"
+    assert "Strict-Transport-Security" not in resp.headers
+
+
+def test_hsts_header_value_opt_in_https_non_loopback(monkeypatch):
+    from app.security_headers import DEFAULT_HSTS_MAX_AGE, hsts_header_value
+
+    monkeypatch.delenv("DEEPCATALOG_HSTS", raising=False)
+    assert hsts_header_value(https=True, host_header="docs.example.com") is None
+
+    monkeypatch.setenv("DEEPCATALOG_HSTS", "1")
+    assert hsts_header_value(https=False, host_header="docs.example.com") is None
+    assert hsts_header_value(https=True, host_header="localhost:8080") is None
+    assert hsts_header_value(https=True, host_header="127.0.0.1") is None
+    assert hsts_header_value(https=True, host_header="[::1]:8443") is None
+
+    value = hsts_header_value(https=True, host_header="archive.example.com")
+    assert value == f"max-age={DEFAULT_HSTS_MAX_AGE}; includeSubDomains"
+
+    monkeypatch.setenv("DEEPCATALOG_HSTS_MAX_AGE", "3600")
+    assert (
+        hsts_header_value(https=True, host_header="archive.example.com")
+        == "max-age=3600; includeSubDomains"
+    )
+
+
+def test_hsts_sent_only_when_opted_in_over_https(client, monkeypatch):
+    monkeypatch.setenv("DEEPCATALOG_HSTS", "1")
+    monkeypatch.setenv("DEEPCATALOG_ALLOWED_HOSTS", "archive.example.com,localhost,127.0.0.1")
+    monkeypatch.setattr("app.main.request_is_https", lambda _request: True)
+
+    resp = client.get("/api/health", headers={"Host": "archive.example.com"})
+    assert resp.status_code == 200
+    assert resp.headers.get("Strict-Transport-Security", "").startswith("max-age=")
+
+    local = client.get("/api/health", headers={"Host": "127.0.0.1:8080"})
+    assert local.status_code == 200
+    assert "Strict-Transport-Security" not in local.headers

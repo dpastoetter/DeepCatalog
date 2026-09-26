@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deepcatalog"
-version = "0.7.1"
+version = "0.7.2"
 description = "Deep document intelligence, local-first."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -25,6 +25,7 @@ dependencies = [
   "httpcore>=1.0",
   "python-multipart>=0.0.9",
   "cryptography>=42",
+  "pytesseract>=0.3.10",
 ]
 
 [project.optional-dependencies]
@@ -120,9 +121,6 @@ pretty = true
 show_error_codes = true
 packages = ["deepcatalog", "app"]
 
-[[tool.mypy.overrides]]
-module = [
-  "deepcatalog.llm",
-  "deepcatalog.desktop",
-]
-ignore_errors = true
+# deepcatalog.desktop stays omitted from coverage (native GUI), but is type-checked.
+# Security-sensitive modules have focused branch floors in scripts/coverage-security.sh
+# (local_security, sessions, updater, ollama_url, media_*, filesystem).

@@ -47,24 +47,23 @@ def test_rejects_unparseable_pdf_stub(tmp_path: Path):
 def test_rejects_absurd_pdf_page_count(tmp_path: Path, monkeypatch):
     pdf = write_minimal_pdf(tmp_path / "many.pdf")
 
-    class FakePage:
-        mediabox = type("B", (), {"width": 612, "height": 792})()
+    def fake_validate(_path):
+        from deepcatalog.media_worker import MediaWorkerError
 
-    class FakeReader:
-        is_encrypted = False
-        pages = [FakePage(), FakePage(), FakePage()]
+        raise MediaWorkerError("PDF has too many pages (3; max 2)", code="too_many_pages")
 
-    monkeypatch.setattr("deepcatalog.media_validate.PdfReader", lambda *_a, **_k: FakeReader())
-    monkeypatch.setattr("deepcatalog.media_validate.config.MEDIA_MAX_PDF_PAGES", 2)
-    with pytest.raises(MediaValidationError, match="too many pages"):
+    monkeypatch.setattr(
+        "deepcatalog.media_validate.validate_pdf_structure_isolated",
+        fake_validate,
+    )
+    with pytest.raises(MediaValidationError, match="too many pages") as exc:
         validate_scan_file(pdf)
+    assert exc.value.code == "too_many_pages"
 
 
 def test_rejects_oversized_image_pixels(tmp_path: Path, monkeypatch):
     path = tmp_path / "huge.png"
-    # Small on disk but claim huge size via monkeypatch after open is hard;
-    # instead lower the ceiling and save a moderately large image.
-    monkeypatch.setattr("deepcatalog.media_validate.config.MEDIA_MAX_IMAGE_PIXELS", 1000)
+    monkeypatch.setattr("deepcatalog.media_worker.config.MEDIA_MAX_IMAGE_PIXELS", 1000)
     Image.new("RGB", (50, 50), "white").save(path, format="PNG")
     with pytest.raises(MediaValidationError) as exc:
         validate_scan_file(path)

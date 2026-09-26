@@ -14,7 +14,7 @@ import contextlib
 import os
 from collections.abc import AsyncGenerator
 from functools import cached_property
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from google.adk.labs.openai import OpenAILlm, OpenAIResponsesLlm
@@ -193,10 +193,11 @@ class _AdkOllamaOpenAILlm(OpenAILlm):
         base_url = ollama_openai_compatible_base_url(
             config.OLLAMA_BASE_URL, allow_remote=allow_remote
         )
+        # OpenAI SDK pins httpx2 stubs; our pinned client is stock httpx.
         return AsyncOpenAI(
             api_key=os.environ.get("OPENAI_API_KEY") or "ollama",
             base_url=base_url,
-            http_client=ollama_pinned_async_http_client(timeout=OLLAMA_CHAT_TIMEOUT),
+            http_client=cast(Any, ollama_pinned_async_http_client(timeout=OLLAMA_CHAT_TIMEOUT)),
             timeout=OLLAMA_CHAT_TIMEOUT,
             max_retries=2,
         )
@@ -492,15 +493,18 @@ async def _complete_openai_api(
 
     ensure_openai_env()
     client = AsyncOpenAI(timeout=LLM_TEXT_TIMEOUT, max_retries=2)
-    response = await client.chat.completions.create(
-        model=model_name,
-        messages=[
+    # Dynamic kwargs + plain dict messages: OpenAI stubs want TypedDict unions.
+    create_kwargs: dict[str, Any] = {
+        "model": model_name,
+        "messages": [
             {"role": "system", "content": instructions},
             {"role": "user", "content": prompt},
         ],
-        temperature=0.2,
-        **({"response_format": {"type": "json_object"}} if json_mode else {}),
-    )
+        "temperature": 0.2,
+    }
+    if json_mode:
+        create_kwargs["response_format"] = {"type": "json_object"}
+    response = await client.chat.completions.create(**create_kwargs)
     _record_openai_response("openai", model_name, response)
     return (response.choices[0].message.content or "").strip()
 
@@ -649,7 +653,7 @@ async def _complete_codex_images(
     stream = await client.responses.create(
         model=model_name,
         instructions=instructions,
-        input=[{"role": "user", "content": content}],
+        input=cast(Any, [{"role": "user", "content": content}]),
         store=False,
         stream=True,
     )
@@ -675,10 +679,13 @@ async def _complete_openai_images(
     client = AsyncOpenAI(timeout=LLM_VISION_TIMEOUT, max_retries=2)
     response = await client.chat.completions.create(
         model=model_name,
-        messages=[
-            {"role": "system", "content": instructions},
-            {"role": "user", "content": content},
-        ],
+        messages=cast(
+            Any,
+            [
+                {"role": "system", "content": instructions},
+                {"role": "user", "content": content},
+            ],
+        ),
         temperature=0.1,
     )
     _record_openai_response("openai", model_name, response)

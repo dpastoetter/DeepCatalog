@@ -83,6 +83,15 @@ if ($pdftoppm) {
     Write-Warn "  https://github.com/oschwartz10612/poppler-windows/releases"
 }
 
+$tesseract = Get-Command tesseract -ErrorAction SilentlyContinue
+if ($tesseract) {
+    Write-Ok "tesseract — classical OCR fast path ready"
+} else {
+    Write-Warn "tesseract not found — scanned pages fall back to slower AI vision OCR"
+    Write-Warn "  Install a UB Mannheim build and add tesseract to PATH"
+    Write-Warn "  https://github.com/UB-Mannheim/tesseract/wiki"
+}
+
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("deepcatalog-install-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $tmp | Out-Null
 

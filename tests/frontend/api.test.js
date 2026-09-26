@@ -8,7 +8,11 @@ import {
   fillOllamaModelSelects,
   formatApiError,
   isFinancialDocType,
+  modelNameMatches,
   referenceIdsToString,
+  selectedOllamaModelsMissing,
+  syncOllamaPullButton,
+  tagsIncludeModel,
 } from "../../app/static/api.js";
 import { settingsShellHtml } from "../../app/static/settings.js";
 
@@ -160,5 +164,67 @@ describe("fillOllamaModelSelects", () => {
     expect(embed.value).toBe("bge-m3");
     expect([...chat.options].map((o) => o.value)).toContain("custom-vl:7b");
     expect([...chat.options].map((o) => o.value)).toContain("gemma3");
+  });
+
+  it("keeps the user's pending selection across status refreshes", () => {
+    const payload = {
+      catalog: {
+        chat: [
+          { id: "gemma3", label: "Gemma 3" },
+          { id: "llava", label: "LLaVA" },
+        ],
+        embed: [{ id: "nomic-embed-text", label: "nomic" }],
+      },
+      installed_models: ["gemma3:4b", "nomic-embed-text"],
+      chat_model: "gemma3",
+      embedding_model: "nomic-embed-text",
+      reachable: true,
+      listening: true,
+      missing_models: [],
+    };
+    fillOllamaModelSelects(payload);
+    const chat = document.getElementById("ollama-chat-model");
+    chat.value = "llava";
+    fillOllamaModelSelects(payload);
+    expect(chat.value).toBe("llava");
+  });
+});
+
+describe("ollama pull readiness", () => {
+  beforeEach(() => {
+    document.body.innerHTML = settingsShellHtml();
+  });
+
+  it("matches installed tags the same way as the backend", () => {
+    expect(modelNameMatches("gemma3:4b", "gemma3")).toBe(true);
+    expect(tagsIncludeModel(["gemma3:4b"], "gemma3")).toBe(true);
+    expect(tagsIncludeModel(["llava:latest"], "gemma3")).toBe(false);
+  });
+
+  it("enables Pull when the selected catalog model is not installed", () => {
+    const ollama = {
+      reachable: true,
+      listening: true,
+      installed_models: ["gemma3:4b", "nomic-embed-text"],
+      missing_models: [],
+      catalog: {
+        chat: [
+          { id: "gemma3", label: "Gemma 3" },
+          { id: "llava", label: "LLaVA" },
+        ],
+        embed: [{ id: "nomic-embed-text", label: "nomic" }],
+      },
+      chat_model: "gemma3",
+      embedding_model: "nomic-embed-text",
+    };
+    fillOllamaModelSelects(ollama);
+    syncOllamaPullButton(ollama);
+    const pull = document.getElementById("ollama-pull");
+    expect(pull.disabled).toBe(true);
+
+    document.getElementById("ollama-chat-model").value = "llava";
+    expect(selectedOllamaModelsMissing(ollama)).toEqual(["llava"]);
+    syncOllamaPullButton(ollama);
+    expect(pull.disabled).toBe(false);
   });
 });
