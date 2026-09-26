@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import tarfile
+import tempfile
+from pathlib import Path
 
 import httpx
 import pytest
@@ -21,17 +24,22 @@ from deepcatalog.release_trust import (
     sign_manifest,
 )
 from deepcatalog.updater import (
+    DownloadRedirectError,
+    DownloadTooLargeError,
     _github_get,
     _pick_appimage_asset,
     apply_appimage_bytes,
     apply_tarball,
     apply_update,
     check_for_update,
+    download_to_tempfile,
+    is_allowed_update_url,
     is_newer,
     parse_sha256sums,
     parse_version,
     sha256_hex,
     verify_sha256,
+    verify_sha256_digest,
 )
 from deepcatalog.version import clear_version_cache
 from deepcatalog.version import get_current_version as read_version
@@ -226,7 +234,7 @@ def test_apply_update_refuses_when_up_to_date(monkeypatch):
             "status": "success",
             "current_version": "0.1.0",
             "latest_version": "0.1.0",
-            "download_url": "https://example.invalid/tarball",
+            "download_url": "https://github.com/dpastoetter/DeepCatalog/releases/download/v9.9.9/tarball",
             "expected_sha256": "a" * 64,
             "verifiable": True,
             "update_available": False,
@@ -257,6 +265,14 @@ def test_apply_update_refuses_unverified_release(monkeypatch):
 
 def test_apply_update_refuses_checksum_mismatch(isolated_root, monkeypatch):
     tarball = _make_tarball({"pyproject.toml": b'[project]\nversion = "9.9.9"\n'})
+
+    def fake_download(url, **_kwargs):
+        fd, name = tempfile.mkstemp(prefix="dc-test-")
+        os.close(fd)
+        path = Path(name)
+        path.write_bytes(tarball)
+        return path, sha256_hex(tarball), len(tarball)
+
     monkeypatch.setattr(
         "deepcatalog.updater.check_for_update",
         lambda: {
@@ -269,12 +285,15 @@ def test_apply_update_refuses_checksum_mismatch(isolated_root, monkeypatch):
             "installable": True,
             "artifact_kind": "tarball",
             "manifest_commit": "a" * 40,
-            "download_url": "https://example.invalid/deepcatalog-9.9.9.tar.gz",
+            "download_url": (
+                "https://github.com/dpastoetter/DeepCatalog/releases/download/"
+                "v9.9.9/deepcatalog-9.9.9.tar.gz"
+            ),
             "expected_sha256": "0" * 64,
             "artifact_name": "deepcatalog-9.9.9.tar.gz",
         },
     )
-    monkeypatch.setattr("deepcatalog.updater._download_bytes", lambda _url: tarball)
+    monkeypatch.setattr("deepcatalog.updater.download_to_tempfile", fake_download)
     result = apply_update()
     assert result["status"] == "error"
     assert "mismatch" in result["error"].lower()
@@ -293,7 +312,7 @@ def test_apply_update_refuses_unsigned_even_with_checksum(monkeypatch):
             "signed": False,
             "installable": True,
             "artifact_kind": "tarball",
-            "download_url": "https://example.invalid/deepcatalog-9.9.9.tar.gz",
+            "download_url": "https://github.com/dpastoetter/DeepCatalog/releases/download/v9.9.9/deepcatalog-9.9.9.tar.gz",
             "expected_sha256": "a" * 64,
             "verification_error": None,
         },
@@ -313,6 +332,14 @@ def test_apply_update_installs_verified_release(isolated_root, monkeypatch):
         root="deepcatalog-9.9.9",
     )
     digest = hashlib.sha256(tarball).hexdigest()
+
+    def fake_download(url, **_kwargs):
+        fd, name = tempfile.mkstemp(prefix="dc-test-")
+        os.close(fd)
+        path = Path(name)
+        path.write_bytes(tarball)
+        return path, digest, len(tarball)
+
     monkeypatch.setattr(
         "deepcatalog.updater.check_for_update",
         lambda: {
@@ -334,7 +361,7 @@ def test_apply_update_installs_verified_release(isolated_root, monkeypatch):
             "commit_sha": commit,
         },
     )
-    monkeypatch.setattr("deepcatalog.updater._download_bytes", lambda _url: tarball)
+    monkeypatch.setattr("deepcatalog.updater.download_to_tempfile", fake_download)
     result = apply_update()
     assert result["status"] == "success"
     assert result["restart_required"] is True
@@ -392,11 +419,11 @@ def test_fetch_unsigned_release_is_not_verifiable(monkeypatch):
                     "assets": [
                         {
                             "name": "deepcatalog-9.9.9.tar.gz",
-                            "browser_download_url": "https://example.invalid/deepcatalog-9.9.9.tar.gz",
+                            "browser_download_url": "https://github.com/dpastoetter/DeepCatalog/releases/download/v9.9.9/deepcatalog-9.9.9.tar.gz",
                         },
                         {
                             "name": "SHA256SUMS",
-                            "browser_download_url": "https://example.invalid/SHA256SUMS",
+                            "browser_download_url": "https://github.com/dpastoetter/DeepCatalog/releases/download/v9.9.9/SHA256SUMS",
                         },
                     ],
                 },
@@ -465,15 +492,15 @@ def test_fetch_signed_release_is_installable(monkeypatch):
                     "assets": [
                         {
                             "name": "deepcatalog-9.9.9.tar.gz",
-                            "browser_download_url": "https://example.invalid/deepcatalog-9.9.9.tar.gz",
+                            "browser_download_url": "https://github.com/dpastoetter/DeepCatalog/releases/download/v9.9.9/deepcatalog-9.9.9.tar.gz",
                         },
                         {
                             "name": MANIFEST_NAME,
-                            "browser_download_url": "https://example.invalid/release-manifest.json",
+                            "browser_download_url": "https://github.com/dpastoetter/DeepCatalog/releases/download/v9.9.9/release-manifest.json",
                         },
                         {
                             "name": MANIFEST_SIG_NAME,
-                            "browser_download_url": "https://example.invalid/release-manifest.json.sig",
+                            "browser_download_url": "https://github.com/dpastoetter/DeepCatalog/releases/download/v9.9.9/release-manifest.json.sig",
                         },
                     ],
                 },
@@ -546,15 +573,15 @@ def test_fetch_rejects_manifest_commit_mismatch(monkeypatch):
                     "assets": [
                         {
                             "name": "deepcatalog-9.9.9.tar.gz",
-                            "browser_download_url": "https://example.invalid/deepcatalog-9.9.9.tar.gz",
+                            "browser_download_url": "https://github.com/dpastoetter/DeepCatalog/releases/download/v9.9.9/deepcatalog-9.9.9.tar.gz",
                         },
                         {
                             "name": MANIFEST_NAME,
-                            "browser_download_url": "https://example.invalid/release-manifest.json",
+                            "browser_download_url": "https://github.com/dpastoetter/DeepCatalog/releases/download/v9.9.9/release-manifest.json",
                         },
                         {
                             "name": MANIFEST_SIG_NAME,
-                            "browser_download_url": "https://example.invalid/release-manifest.json.sig",
+                            "browser_download_url": "https://github.com/dpastoetter/DeepCatalog/releases/download/v9.9.9/release-manifest.json.sig",
                         },
                     ],
                 },
@@ -599,6 +626,14 @@ def test_apply_update_installs_appimage(monkeypatch, tmp_path):
     target.write_bytes(b"old")
     payload = b"signed-appimage-bytes"
     digest = sha256_hex(payload)
+
+    def fake_download(url, **_kwargs):
+        fd, name = tempfile.mkstemp(prefix="dc-test-")
+        os.close(fd)
+        path = Path(name)
+        path.write_bytes(payload)
+        return path, digest, len(payload)
+
     monkeypatch.setattr("deepcatalog.updater.running_as_appimage", lambda: True)
     monkeypatch.setenv("APPIMAGE", str(target))
     monkeypatch.setattr(
@@ -612,13 +647,16 @@ def test_apply_update_installs_appimage(monkeypatch, tmp_path):
             "signed": True,
             "installable": True,
             "artifact_kind": "appimage",
-            "download_url": "https://example.invalid/DeepCatalog-9.9.9-x86_64.AppImage",
+            "download_url": (
+                "https://github.com/dpastoetter/DeepCatalog/releases/download/"
+                "v9.9.9/DeepCatalog-9.9.9-x86_64.AppImage"
+            ),
             "expected_sha256": digest,
             "artifact_name": "DeepCatalog-9.9.9-x86_64.AppImage",
             "manifest_commit": "a" * 40,
         },
     )
-    monkeypatch.setattr("deepcatalog.updater._download_bytes", lambda _url: payload)
+    monkeypatch.setattr("deepcatalog.updater.download_to_tempfile", fake_download)
     result = apply_update()
     assert result["status"] == "success"
     assert result["artifact_kind"] == "appimage"
@@ -646,3 +684,247 @@ def test_apply_update_refuses_appimage_when_not_installable(monkeypatch):
     assert result["status"] == "error"
     assert result["installable"] is False
     assert "writable" in result["error"].lower()
+
+
+# --- streamed download limits / redirects ------------------------------------
+
+
+def test_is_allowed_update_url_https_github_only():
+    assert is_allowed_update_url(
+        "https://github.com/dpastoetter/DeepCatalog/releases/download/v1/a.tar.gz"
+    )
+    assert is_allowed_update_url(
+        "https://api.github.com/repos/dpastoetter/DeepCatalog/releases/latest"
+    )
+    assert is_allowed_update_url(
+        "https://objects.githubusercontent.com/github-production-release-asset/1"
+    )
+    assert is_allowed_update_url("https://release-assets.githubusercontent.com/foo")
+    assert not is_allowed_update_url("http://github.com/dpastoetter/DeepCatalog/a")
+    assert not is_allowed_update_url("https://evil.example/payload")
+    assert not is_allowed_update_url("https://github.com.evil.example/a")
+
+
+def test_download_to_tempfile_normal_and_hash():
+    payload = b"hello-release-bytes"
+    url = "https://github.com/dpastoetter/DeepCatalog/releases/download/v1/a.bin"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=payload,
+            headers={"Content-Length": str(len(payload))},
+        )
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport, follow_redirects=False) as client:
+        path, digest, size = download_to_tempfile(url, max_bytes=1024, client=client)
+    try:
+        assert path.is_file()
+        assert path.read_bytes() == payload
+        assert digest == sha256_hex(payload)
+        assert size == len(payload)
+    finally:
+        path.unlink(missing_ok=True)
+    assert not path.exists()
+
+
+def test_download_to_tempfile_missing_content_length():
+    payload = b"no-cl-header-payload"
+    url = "https://github.com/dpastoetter/DeepCatalog/releases/download/v1/b.bin"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=payload)
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport, follow_redirects=False) as client:
+        path, digest, size = download_to_tempfile(url, max_bytes=1024, client=client)
+    try:
+        assert size == len(payload)
+        assert digest == sha256_hex(payload)
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_download_rejects_oversized_content_length():
+    url = "https://github.com/dpastoetter/DeepCatalog/releases/download/v1/big.bin"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b"tiny",
+            headers={"Content-Length": "1000000"},
+        )
+
+    transport = httpx.MockTransport(handler)
+    with (
+        httpx.Client(transport=transport, follow_redirects=False) as client,
+        pytest.raises(DownloadTooLargeError, match="Content-Length"),
+    ):
+        download_to_tempfile(url, max_bytes=100, client=client)
+
+
+def test_download_enforces_limit_when_content_length_undersized():
+    """Lying Content-Length must not bypass the streaming byte ceiling."""
+    url = "https://github.com/dpastoetter/DeepCatalog/releases/download/v1/lie.bin"
+    body = b"x" * 200
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body, headers={"Content-Length": "10"})
+
+    transport = httpx.MockTransport(handler)
+    with (
+        httpx.Client(transport=transport, follow_redirects=False) as client,
+        pytest.raises(DownloadTooLargeError, match="exceeded limit"),
+    ):
+        download_to_tempfile(url, max_bytes=50, client=client)
+
+
+def test_download_rejects_oversized_body_without_content_length():
+    url = "https://github.com/dpastoetter/DeepCatalog/releases/download/v1/fat.bin"
+
+    def body():
+        # Chunked body so MockTransport does not advertise Content-Length.
+        for _ in range(10):
+            yield b"y" * 60
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body())
+
+    transport = httpx.MockTransport(handler)
+    with (
+        httpx.Client(transport=transport, follow_redirects=False) as client,
+        pytest.raises(DownloadTooLargeError, match="exceeded limit"),
+    ):
+        download_to_tempfile(url, max_bytes=100, client=client)
+
+
+def test_download_interrupted_cleans_tempfile(tmp_path, monkeypatch):
+    url = "https://github.com/dpastoetter/DeepCatalog/releases/download/v1/cut.bin"
+    created: list[Path] = []
+    real_mkstemp = tempfile.mkstemp
+
+    def tracking_mkstemp(*args, **kwargs):
+        fd, name = real_mkstemp(*args, **kwargs)
+        created.append(Path(name))
+        return fd, name
+
+    monkeypatch.setattr("deepcatalog.updater.tempfile.mkstemp", tracking_mkstemp)
+
+    def broken_body():
+        yield b"partial-data"
+        raise httpx.ReadError("connection reset")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=broken_body())
+
+    transport = httpx.MockTransport(handler)
+    with (
+        httpx.Client(transport=transport, follow_redirects=False) as client,
+        pytest.raises(httpx.ReadError),
+    ):
+        download_to_tempfile(url, max_bytes=10_000, client=client)
+
+    assert created
+    for path in created:
+        assert not path.exists()
+
+
+def test_download_hash_mismatch_helper():
+    verify_sha256_digest("a" * 64, "a" * 64)
+    with pytest.raises(ValueError, match="mismatch"):
+        verify_sha256_digest("a" * 64, "b" * 64)
+
+
+def test_download_rejects_http_and_offsite_redirects():
+    start = "https://github.com/dpastoetter/DeepCatalog/releases/download/v1/a.bin"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "github.com":
+            return httpx.Response(
+                302,
+                headers={"Location": "http://objects.githubusercontent.com/asset"},
+            )
+        return httpx.Response(200, content=b"nope")
+
+    transport = httpx.MockTransport(handler)
+    with (
+        httpx.Client(transport=transport, follow_redirects=False) as client,
+        pytest.raises(DownloadRedirectError),
+    ):
+        download_to_tempfile(start, max_bytes=1024, client=client)
+
+    def evil_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "github.com":
+            return httpx.Response(
+                302,
+                headers={"Location": "https://evil.example/steal.bin"},
+            )
+        return httpx.Response(200, content=b"stolen")
+
+    transport = httpx.MockTransport(evil_handler)
+    with (
+        httpx.Client(transport=transport, follow_redirects=False) as client,
+        pytest.raises(DownloadRedirectError),
+    ):
+        download_to_tempfile(start, max_bytes=1024, client=client)
+
+
+def test_download_allows_github_cdn_redirect():
+    payload = b"cdn-bytes"
+    start = "https://github.com/dpastoetter/DeepCatalog/releases/download/v1/a.bin"
+    cdn = "https://objects.githubusercontent.com/github-production-release-asset/1"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "github.com":
+            return httpx.Response(302, headers={"Location": cdn})
+        assert request.url.host == "objects.githubusercontent.com"
+        return httpx.Response(200, content=payload)
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport, follow_redirects=False) as client:
+        path, digest, size = download_to_tempfile(start, max_bytes=1024, client=client)
+    try:
+        assert path.read_bytes() == payload
+        assert digest == sha256_hex(payload)
+        assert size == len(payload)
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_apply_update_cleans_temp_after_hash_mismatch(isolated_root, monkeypatch):
+    leftover: list[Path] = []
+
+    def fake_download(url, **_kwargs):
+        fd, name = tempfile.mkstemp(prefix="dc-mismatch-")
+        os.close(fd)
+        path = Path(name)
+        path.write_bytes(b"not-the-expected-bytes")
+        leftover.append(path)
+        return path, sha256_hex(b"not-the-expected-bytes"), path.stat().st_size
+
+    monkeypatch.setattr(
+        "deepcatalog.updater.check_for_update",
+        lambda: {
+            "status": "success",
+            "current_version": "0.1.0",
+            "latest_version": "9.9.9",
+            "update_available": True,
+            "verifiable": True,
+            "signed": True,
+            "installable": True,
+            "artifact_kind": "tarball",
+            "manifest_commit": "a" * 40,
+            "download_url": (
+                "https://github.com/dpastoetter/DeepCatalog/releases/download/"
+                "v9.9.9/deepcatalog-9.9.9.tar.gz"
+            ),
+            "expected_sha256": "0" * 64,
+            "artifact_name": "deepcatalog-9.9.9.tar.gz",
+        },
+    )
+    monkeypatch.setattr("deepcatalog.updater.download_to_tempfile", fake_download)
+    result = apply_update()
+    assert result["status"] == "error"
+    assert leftover
+    assert all(not p.exists() for p in leftover)

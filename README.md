@@ -37,11 +37,12 @@ Switching to a cloud provider does not move your filed archive off-disk. It only
 - **Local storage**: inbox and per-category archive folders, `data/deepcatalog.db` (SQLite + FTS5), `data/chroma/` (vectors) — always on this machine; cloud AI does not replace this store
 - **Inbox polling**: automatic processing of new scans on a configurable interval
 - **Local Ollama tooling**: start the daemon, pull models, show CPU/GPU usage for loaded models, unload or restart Ollama from Settings
-- **Boot autostart (Linux)**: optional systemd user service so the web UI comes up after login or reboot
+- **Boot autostart (Linux)**: optional systemd user service with a default sandbox (`PrivateTmp`, `ProtectSystem=full`, …); optional stricter profile via `DEEPCATALOG_SYSTEMD_STRICT`
 - **Web app**: full-height workbench for Inbox, Review, Archive, Ask, and Settings; keyboard shortcuts (`?` help, `/` Archive search); PDF preview in Review and Archive; four theme presets; toasts; mockup mode for screenshots
 - **Linux AppImage**: download a single `x86_64` binary from GitHub Releases (bundles Python, Poppler, and Tesseract; data stays in `~/.local/share/deepcatalog`)
-- **Self-update**: check and install new releases from GitHub directly from Settings
+- **Self-update**: check and install new releases from GitHub directly from Settings (signed manifest, streamed download, size ceilings)
 - **CI & coverage**: `./scripts/ci.sh` runs format, lint, mypy, Vitest, pytest (global floor), then focused security-module coverage floors
+- **Security policy**: private vulnerability reporting guidance in [`.github/SECURITY.md`](.github/SECURITY.md)
 
 ## Screenshots
 
@@ -323,7 +324,9 @@ That owned entry records `DEEPCATALOG_HOST` / `DEEPCATALOG_PORT` and starts uvic
 | Ollama OCR times out on CPU | Raise `DEEPCATALOG_OLLAMA_OCR_PAGE_TIMEOUT` (default 900s) or lower `DEEPCATALOG_OLLAMA_OCR_MAX_IMAGE_PX` (default 1024); see [OCR tuning](#ocr-and-long-documents) |
 | Find details fails with “invalid JSON” | Usually empty/malformed model output — retry the file; with ChatGPT OAuth confirm a Codex model is selected and you are signed in |
 
-Uvicorn should bind to `127.0.0.1` (the default). **Loopback is not an authentication boundary** — any local process or OS account can connect to `127.0.0.1:8080`. On first launch the app generates `DEEPCATALOG_API_TOKEN` and stores it in `DATA_DIR/.env` (mode `0600`). Every `/api/*` route except health and session/desktop bootstrap requires `Authorization: Bearer …` or an HttpOnly `deepcatalog_session` cookie. The desktop window bootstraps through a one-time nonce (not by treating localhost as logged-in). A browser on a shared machine uses the unlock panel with that token. Mutating routes also require a custom header the UI sends (CSRF hardening).
+Uvicorn should bind to `127.0.0.1` (the default). **Loopback is not an authentication boundary** — any local process or OS account can connect to `127.0.0.1:8080`. On first launch the app generates `DEEPCATALOG_API_TOKEN` and stores it in `DATA_DIR/.env` (mode `0600`). Every `/api/*` route except health and session/desktop bootstrap requires `Authorization: Bearer …` or an HttpOnly `deepcatalog_session` cookie. The desktop window bootstraps through a one-time nonce (not by treating localhost as logged-in). A browser on a shared machine uses the unlock panel with that token. Mutating routes also require the custom header `X-Requested-With: DeepCatalog` (CSRF hardening). To report a vulnerability privately, see [`.github/SECURITY.md`](.github/SECURITY.md) — do not open a public issue for an unpatched flaw.
+
+**Data directory permissions (POSIX):** `DATA_DIR` and its standard subdirs (`inbox`, `archive`, `chroma`) are created and kept at mode `0700`. Sensitive app-owned files under that tree (`.env`, `sessions.json`, `settings.json`, `privacy.json`, `.desktop-bootstrap`, SQLite DB + WAL/SHM, `chroma/index_meta.json`) are written or tightened to `0600`. Startup corrects those known paths only — it does **not** recursively chmod category folders or archives configured outside `DATA_DIR`. The systemd user unit sets `UMask=0077` so new files from the service inherit owner-only modes, plus `NoNewPrivileges` and the other default sandbox directives documented under Autostart. On Windows these modes are skipped. Existing installs: re-run the app (or `ensure_data_dirs`) to tighten the standard layout; for a full lockdown of Chroma internals you may manually `chmod -R go-rwx "$DATA_DIR"` — never run that on external document trees.
 
 **Local mode** (default): `DEEPCATALOG_HOST=127.0.0.1` / `::1` — plain HTTP is fine on loopback, but **API auth is still required**. Set `DEEPCATALOG_SINGLE_USER=1` only on a dedicated machine if you explicitly want the old “anyone on loopback is trusted” behavior.
 
@@ -412,7 +415,11 @@ Behind a reverse proxy that terminates TLS, set `DEEPCATALOG_HSTS=1` the same wa
 
 **Settings → Autostart → Start DeepCatalog Studio when the system boots** installs a user systemd unit at `~/.config/systemd/user/deepcatalog.service`, runs `loginctl enable-linger` so the service can start without an interactive login, and starts the unit if port 8080 is free.
 
-The unit reads your install’s `.env`, sets `DATA_DIR`, and starts `python -m deepcatalog.serve` from the project venv (same host/port as `DEEPCATALOG_HOST` / `DEEPCATALOG_PORT`). Customize bind address/port in `.env` before enabling autostart.
+The unit reads your install’s `.env`, sets `DATA_DIR`, and starts `python -m deepcatalog.serve` from the project venv (or the AppImage with `--headless`), using the same host/port as `DEEPCATALOG_HOST` / `DEEPCATALOG_PORT`. Customize bind address/port in `.env` before enabling autostart. Re-toggle Autostart after upgrading so older units pick up new sandbox directives.
+
+**Default sandbox** (safe for home-based inbox/archive, Ollama, HTTPS updates, SQLite/Chroma, Poppler): `UMask=0077`, `NoNewPrivileges=true`, `PrivateTmp=true`, `ProtectSystem=full`, kernel/cgroup/hostname/clock protections, `RestrictSUIDSGID`, `LockPersonality`, `RestrictRealtime`, and `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`. **Not** enabled by default: `ProtectHome` (would break archives under `$HOME`), `PrivateDevices` (AppImage needs `/dev/fuse`), `RestrictNamespaces` (would block media-worker netns), `SystemCallFilter` / `MemoryDenyWriteExecute` (can break native extensions).
+
+**Optional stricter profile:** set `DEEPCATALOG_SYSTEMD_STRICT=1` in `.env` before (re)enabling Autostart. That switches to `ProtectSystem=strict` with `ReadWritePaths` for `DATA_DIR` + project root, adds `MemoryDenyWriteExecute` and a `@system-service`/`@network-io` syscall filter, and (venv only) `PrivateDevices=true`. List every external inbox/archive root in `DEEPCATALOG_SYSTEMD_READWRITE_PATHS` as a colon-separated absolute path list — otherwise filing outside `DATA_DIR` will fail closed.
 
 Manual control:
 
@@ -434,7 +441,7 @@ Autostart requires Linux with `systemctl --user`. It is hidden on other platform
 
 Filing rules (source folder, category → folder mapping, poll interval, OCR accuracy, review requirement) live in **Settings → Filing & scanning** and are stored in `data/settings.json`. The **Require human review** checkbox applies as soon as you toggle it (folders and poll interval still use **Save setup**). Older settings files missing a `review` or `ocr` key are filled in on load.
 
-**Danger zone → Remove all stored data** deletes only (1) files tracked in the metadata DB whose paths still lie inside a configured archive root, (2) supported inbox scan files (PDF/images), and (3) the app-owned SQLite + Chroma stores under `DATA_DIR`. It never recursively wipes a category folder or the inbox directory. The API requires the confirmation phrase `DELETE ALL DEEPCATALOG DATA` (UI two-click confirm is not enough). Settings also refuse dangerous roots (`/`, `$HOME`, `~/Downloads`, `~/Documents`, the project root, system paths, and `DATA_DIR` itself).
+**Danger zone → Remove all stored data** deletes only (1) files tracked in the metadata DB whose paths still lie inside a configured archive root, (2) supported inbox scan files (PDF/images), and (3) the app-owned SQLite + Chroma stores under `DATA_DIR`. It never recursively wipes a category folder or the inbox directory. The API requires the confirmation phrase `DELETE ALL DEEPCATALOG DATA` (UI two-click confirm is not enough). Settings also refuse dangerous roots (`/`, `$HOME`, `~/Downloads`, `~/Documents`, the project root, system paths, and `DATA_DIR` itself) and refuse inbox/category paths that are symlinks.
 
 ### Processing controls
 
@@ -455,11 +462,11 @@ A scanned PDF can contain text designed to distort classification, extracted met
 | --- | --- |
 | **Prompt markers** | Soft labels (`BEGIN_UNTRUSTED_*_<token>`) plus lookalike neutralization — help the model; **not** a security boundary |
 | **Structured extract** | JSON parse, length clamps, `doc_type` category allowlist, `YYYY-MM-DD` dates only |
-| **Path confinement** | Sources must stay in the inbox; archive destinations are basename-only under owner-configured category folders |
+| **Path confinement** | Sources must stay in the inbox; archive destinations are basename-only under owner-configured category folders. Category/inbox settings refuse symlink roots; filing rejects category/year/dest symlinks (`O_NOFOLLOW` on POSIX) so a planted link cannot redirect writes |
 | **No ADK tools in production** | Ingest/Ask call `complete_text` / `complete_with_images`; Ollama uses fixed API paths |
 | **Human review** | On by default before archive writes; duplicates always queue. Approve re-applies allowlist/clamps/basename rules |
 
-**Untrusted media isolation:** the long-lived web process only does file-size and magic-byte checks (`media_validate`). All `pypdf` / Pillow / Poppler work runs in `media_worker` (resource-limited subprocess when `DEEPCATALOG_MEDIA_WORKER=1`). CI enforces that those parser imports stay out of other modules (`.semgrep/media-parser-boundary.yml` + `scripts/ci.sh` grep).
+**Untrusted media isolation:** the long-lived web process only does file-size and magic-byte checks (`media_validate`). All `pypdf` / Pillow / Poppler work runs in `media_worker` (spawned subprocess when `DEEPCATALOG_MEDIA_WORKER=1`, the default). The child gets a minimal environment (no API keys / cloud credentials), a private `0700` `TMPDIR`, CPU/memory/fd rlimits (inherited by Poppler), Linux `PR_SET_NO_NEW_PRIVS`, and a best-effort empty network namespace when privileges allow. Landlock/bubblewrap are **not** enabled in this build — `/api/diagnostics` reports intended vs available isolation honestly. `DEEPCATALOG_MEDIA_WORKER=0` is for local tests only: startup refuses it when `DEEPCATALOG_ALLOW_REMOTE` is set or the bind host is non-loopback, and otherwise logs a prominent security warning. CI enforces that parser imports stay out of other modules (`.semgrep/media-parser-boundary.yml` + `scripts/ci.sh` grep). The systemd unit’s default sandbox includes `NoNewPrivileges` and `PrivateTmp` but deliberately omits `RestrictNamespaces` so the media-worker netns attempt can still succeed.
 
 ### Metadata & review fields
 
@@ -553,7 +560,7 @@ If you switch embedding providers or models (Gemini / OpenAI / Ollama / local ON
 
 Keep the AppImage somewhere writable. If `$APPIMAGE` is missing or not writable, Settings reports the newer version and links the GitHub asset instead of offering install.
 
-Installs are **fail-closed on provenance**: checksum files on the same GitHub Release are not authentic (whoever can upload `evil.tar.gz` can upload a matching `SHA256SUMS`). The updater requires an **Ed25519-signed** `release-manifest.json` whose public key is embedded in the app (`deepcatalog/release_trust.py`). The manifest binds the GitHub tag, the 40-character commit SHA, and each artifact’s SHA-256. Tag-only or checksum-only releases are shown but refused at install time. `DEEPCATALOG_UPDATE_REPO` is ignored by the in-app updater so an environment change cannot redirect the trust root; forks must change `DEFAULT_UPDATE_REPO` and the verify key in source. Update checks retry on transient network failures.
+Installs are **fail-closed on provenance**: checksum files on the same GitHub Release are not authentic (whoever can upload `evil.tar.gz` can upload a matching `SHA256SUMS`). The updater requires an **Ed25519-signed** `release-manifest.json` whose public key is embedded in the app (`deepcatalog/release_trust.py`). The manifest binds the GitHub tag, the 40-character commit SHA, and each artifact’s SHA-256. Tag-only or checksum-only releases are shown but refused at install time. `DEEPCATALOG_UPDATE_REPO` is ignored by the in-app updater so an environment change cannot redirect the trust root; forks must change `DEFAULT_UPDATE_REPO` and the verify key in source. Update checks retry on transient network failures. Artifact downloads are streamed to a temp file with incremental SHA-256, configurable size ceilings (manifest / signature / metadata / payload), and HTTPS-only redirects constrained to GitHub and `*.githubusercontent.com` CDN hosts — nothing is installed until signature, hash, and commit checks succeed.
 
 CI also publishes **SLSA / Sigstore** artifact attestations for every official file (tarball, AppImage, installers, signed manifest, checksums). Independently:
 
@@ -614,7 +621,8 @@ git checkout v0.6.5
 pip install -e ".[dev]" -c constraints.txt   # pytest, pytest-cov, ruff, mypy, pip-tools
 ./scripts/ci.sh                 # quality gate (format, lint, pip check, mypy, JS, Vitest, pytest+coverage, security floors)
 ./scripts/coverage-security.sh  # re-check focused floors after pytest (needs .coverage)
-./scripts/dependency-audit.sh   # pip-audit (OSV) + npm audit
+./scripts/dependency-audit.sh   # pip-audit (OSV) + npm audit; Chroma ignores from chroma_vuln_suppressions.json
+python scripts/check_chroma_suppressions.py  # fail if a Chroma ignore is expired or out of sync
 python scripts/chroma-advisory-watch.py  # unsuppressed Chroma/OSV watch (scheduled in CI)
 ./scripts/secret-scan.sh        # gitleaks (pinned binary, checksum-verified)
 ./scripts/sast-scan.sh          # Semgrep ERROR-severity (Python + JavaScript; media-parser boundary)
@@ -647,7 +655,7 @@ Installers still call `pip install -r requirements.txt` / `requirements-desktop.
 
 Pull requests and pushes to `main` run [`.github/workflows/ci.yml`](.github/workflows/ci.yml) (`scripts/ci.sh` plus the reusable [security workflow](.github/workflows/security.yml): `pip-audit`/OSV + npm audit, gitleaks, Semgrep, and CodeQL). Version tags and published GitHub Releases run the same quality and security gates on the **exact tagged commit**, then pack the Linux AppImage and publish assets ([`.github/workflows/release.yml`](.github/workflows/release.yml)). Workflows pin Actions to full commit SHAs and grant `contents: write` only to the release publish job. Dependabot opens weekly PRs for GitHub Actions and pip, and monthly PRs for npm.
 
-`constraints.txt` pins `chromadb==1.5.9`. CVE-2026-45829 (pre-auth code injection) and CVE-2026-45833 (authenticated injection) affect Chroma **1.0.0–1.5.9** with **no patched release** as of 10 September 2026. Both target Chroma’s HTTP/FastAPI server, not the embedded client. DeepCatalog only constructs `PersistentClient` through [`deepcatalog/chroma_local.py`](deepcatalog/chroma_local.py) (explicit settings so `CHROMA_SERVER_*` / `CHROMA_API_IMPL` cannot switch the process to HTTP) and never starts a Chroma listener. PR/release `pip-audit` therefore ignores `PYSEC-2026-311` / `GHSA-f4j7-r4q5-qw2c`. A **separate** weekly job ([`.github/workflows/advisory-watch.yml`](.github/workflows/advisory-watch.yml), `scripts/chroma-advisory-watch.py`) runs the same OSV scan **without** those ignores and fails when a newer chromadb lands on PyPI or a non-Chroma advisory appears. Upgrade, fork, or replace Chroma when a fix exists; then drop the CI ignores.
+`constraints.txt` pins `chromadb==1.5.9`. CVE-2026-45829 (pre-auth code injection) and CVE-2026-45833 (authenticated injection) affect Chroma **1.0.0–1.5.9** with **no patched release** as of 10 September 2026. Both target Chroma’s HTTP/FastAPI server, not the embedded client. DeepCatalog only constructs `PersistentClient` through [`deepcatalog/chroma_local.py`](deepcatalog/chroma_local.py) (explicit `RustBindingsAPI` settings so `CHROMA_SERVER_*` / `CHROMA_API_IMPL` cannot switch the process to HTTP) and never starts a Chroma listener. PR/release `pip-audit` ignores are listed in [`scripts/chroma_vuln_suppressions.json`](scripts/chroma_vuln_suppressions.json) with rationale, compensating controls, and a **review expiry**; [`scripts/check_chroma_suppressions.py`](scripts/check_chroma_suppressions.py) fails CI when an entry is past `expires` or out of sync with `dependency-audit.sh`. A **separate** weekly job ([`.github/workflows/advisory-watch.yml`](.github/workflows/advisory-watch.yml), `scripts/chroma-advisory-watch.py`) runs the same OSV scan **without** those ignores and fails when a newer chromadb lands on PyPI or a non-Chroma advisory appears. Upgrade, fork, or replace Chroma when a fix exists; then drop the suppressions.
 
 ### ADK agents (debug, localhost only)
 
@@ -692,7 +700,7 @@ deepcatalog/       # ingest pipeline, review queue, dedup, updater, auth/llm hel
   review.py            #   human-in-the-loop queue (approve / reject)
   dedup.py             #   checksum + content-hash + similarity duplicate detection
   ollama_setup.py      #   Ollama probe, model pull, CPU/GPU summary, provider switch
-  system_service.py    #   systemd user unit for boot autostart
+  system_service.py    #   systemd user unit (default sandbox + optional strict)
   chroma_local.py      #   embedded PersistentClient only (no Chroma HTTP server)
   local_security.py    #   bind policy, token, Host allowlist (loopback is not auth)
   api_token.py         #   generate/persist DEEPCATALOG_API_TOKEN on first launch
@@ -700,15 +708,16 @@ deepcatalog/       # ingest pipeline, review queue, dedup, updater, auth/llm hel
   serve.py             #   owned uvicorn entry (bind host + security policy stay aligned)
   access_log.py        #   strip query strings and bootstrap nonces from uvicorn logs
   auth_rate_limit.py   #   per-IP backoff for session exchange and failed token checks
-  updater.py           #   self-update from GitHub releases
+  updater.py           #   self-update from GitHub releases (stream + size ceilings)
 query_agent/           # RAG Q&A agent
 app/                   # FastAPI app (main.py + routers/) and ES-module UI (static/)
   routers/             #   documents, reviews, settings, processing, auth, updates
   schemas.py           #   request/response models
   static/              #   api.js, inbox.js, review.js, settings.js, events.js, keyboard.js, pdf-preview.js, …
-scripts/               # install.sh, install.ps1, ci.sh, coverage-security.sh, dependency-audit.sh, chroma-advisory-watch.py, secret-scan.sh, sast-scan.sh, precommit.sh, watch_inbox.py, …
+scripts/               # install.sh, install.ps1, ci.sh, coverage-security.sh, dependency-audit.sh, check_chroma_suppressions.py, chroma_vuln_suppressions.json, chroma-advisory-watch.py, secret-scan.sh, sast-scan.sh, precommit.sh, watch_inbox.py, …
 packaging/linux/       # AppImage AppRun, .desktop, icon
 tests/                 # pytest (Python) + tests/frontend (Vitest)
+.github/SECURITY.md    #   vulnerability reporting policy
 docs/screenshots/      # README screenshots (generated with mockup mode)
 docs/deck/             # product slide deck (open index.html in a browser)
 package.json           # Vitest for pure ES-module UI helpers
@@ -736,9 +745,11 @@ DEEPCATALOG_LLM_PROVIDER=ollama   # gemini | openai | ollama
 DEEPCATALOG_MODEL=gemma3
 DEEPCATALOG_EMBEDDING_MODEL=nomic-embed-text
 OLLAMA_BASE_URL=http://localhost:11434
-# DEEPCATALOG_MEDIA_WORKER=1          # isolate Poppler/Pillow/pypdf (recommended)
+# DEEPCATALOG_MEDIA_WORKER=1          # isolate Poppler/Pillow/pypdf (required for LAN)
 # DEEPCATALOG_TESSERACT_ENABLED=1     # classical OCR before AI vision
 # DEEPCATALOG_HSTS=1                  # opt-in; never for localhost/self-signed
+# DEEPCATALOG_SYSTEMD_STRICT=1        # opt-in tighter systemd sandbox (see Autostart)
+# DEEPCATALOG_SYSTEMD_READWRITE_PATHS=/path/to/inbox:/path/to/archive
 ```
 
 Runtime settings (inbox path, categories, poll interval, OCR mode, review requirement) are edited in the web UI and stored in `data/settings.json`, not in `.env`.

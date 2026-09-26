@@ -45,6 +45,7 @@ from deepcatalog.local_security import (
     get_api_token,
     is_direct_loopback_request,
 )
+from deepcatalog.media_worker import media_sandbox_capabilities, media_worker_enabled
 from deepcatalog.ollama_setup import (
     apply_llm_provider,
     enable_ollama,
@@ -190,6 +191,10 @@ def diagnostics() -> dict[str, Any]:
         "auth": codex_auth_status(),
         "cloud_disclaimer": cloud_disclaimer_status(),
         "usage": usage_snapshot(),
+        "media_worker": {
+            "enabled": media_worker_enabled(),
+            "sandbox": media_sandbox_capabilities(),
+        },
     }
     if config.LLM_PROVIDER == "ollama":
         ollama = ollama_status()

@@ -105,15 +105,117 @@ def test_hsts_header_value_opt_in_https_non_loopback(monkeypatch):
     )
 
 
-def test_hsts_sent_only_when_opted_in_over_https(client, monkeypatch):
+def test_hsts_on_direct_https_request(isolated_data, monkeypatch):
     monkeypatch.setenv("DEEPCATALOG_HSTS", "1")
-    monkeypatch.setenv("DEEPCATALOG_ALLOWED_HOSTS", "archive.example.com,localhost,127.0.0.1")
-    monkeypatch.setattr("app.main.request_is_https", lambda _request: True)
+    monkeypatch.setenv("DEEPCATALOG_ALLOWED_HOSTS", "archive.example.com")
+    monkeypatch.delenv("DEEPCATALOG_TRUSTED_PROXIES", raising=False)
 
-    resp = client.get("/api/health", headers={"Host": "archive.example.com"})
+    client = TestClient(
+        app,
+        client=("203.0.113.10", 50000),
+        base_url="https://archive.example.com",
+    )
+    resp = client.get("/api/health")
+    assert resp.status_code == 200
+    assert resp.headers.get("Strict-Transport-Security", "").startswith("max-age=")
+    assert resp.headers.get("Content-Security-Policy") == CONTENT_SECURITY_POLICY
+
+
+def test_hsts_not_on_plain_http(isolated_data, monkeypatch):
+    monkeypatch.setenv("DEEPCATALOG_HSTS", "1")
+    monkeypatch.setenv("DEEPCATALOG_ALLOWED_HOSTS", "archive.example.com")
+    monkeypatch.delenv("DEEPCATALOG_TRUSTED_PROXIES", raising=False)
+
+    client = TestClient(
+        app,
+        client=("203.0.113.10", 50000),
+        base_url="http://archive.example.com",
+    )
+    resp = client.get("/api/health")
+    assert resp.status_code == 200
+    assert "Strict-Transport-Security" not in resp.headers
+
+
+def test_hsts_not_on_loopback_even_over_https(isolated_data, monkeypatch):
+    monkeypatch.setenv("DEEPCATALOG_HSTS", "1")
+    monkeypatch.setenv("DEEPCATALOG_ALLOWED_HOSTS", "localhost,127.0.0.1,::1")
+
+    for base in (
+        "https://127.0.0.1:8080",
+        "https://localhost:8080",
+        "https://[::1]:8080",
+    ):
+        client = TestClient(app, base_url=base)
+        resp = client.get("/api/health")
+        assert resp.status_code == 200, base
+        assert "Strict-Transport-Security" not in resp.headers, base
+
+
+def test_hsts_via_trusted_reverse_proxy(isolated_data, monkeypatch):
+    monkeypatch.setenv("DEEPCATALOG_HSTS", "1")
+    monkeypatch.setenv("DEEPCATALOG_ALLOWED_HOSTS", "archive.example.com")
+    monkeypatch.setenv("DEEPCATALOG_TRUSTED_PROXIES", "10.0.0.1")
+
+    # TLS terminated at the proxy: app sees plain HTTP + trusted X-Forwarded-Proto.
+    client = TestClient(
+        app,
+        client=("10.0.0.1", 50000),
+        base_url="http://archive.example.com",
+    )
+    resp = client.get(
+        "/api/health",
+        headers={"Host": "archive.example.com", "X-Forwarded-Proto": "https"},
+    )
     assert resp.status_code == 200
     assert resp.headers.get("Strict-Transport-Security", "").startswith("max-age=")
 
-    local = client.get("/api/health", headers={"Host": "127.0.0.1:8080"})
-    assert local.status_code == 200
-    assert "Strict-Transport-Security" not in local.headers
+
+def test_hsts_ignores_spoofed_x_forwarded_proto(isolated_data, monkeypatch):
+    monkeypatch.setenv("DEEPCATALOG_HSTS", "1")
+    monkeypatch.setenv("DEEPCATALOG_ALLOWED_HOSTS", "archive.example.com")
+    monkeypatch.delenv("DEEPCATALOG_TRUSTED_PROXIES", raising=False)
+
+    client = TestClient(
+        app,
+        client=("203.0.113.9", 50000),
+        base_url="http://archive.example.com",
+    )
+    resp = client.get(
+        "/api/health",
+        headers={"Host": "archive.example.com", "X-Forwarded-Proto": "https"},
+    )
+    assert resp.status_code == 200
+    assert "Strict-Transport-Security" not in resp.headers
+
+
+def test_hsts_on_early_error_when_https(isolated_data, monkeypatch):
+    """Early middleware 401s must carry the same HSTS decision as success paths."""
+    from deepcatalog.local_security import generate_api_token
+    from deepcatalog.sessions import clear_all_sessions
+
+    monkeypatch.setenv("DEEPCATALOG_HSTS", "1")
+    monkeypatch.setenv("DEEPCATALOG_ALLOWED_HOSTS", "archive.example.com")
+    monkeypatch.setenv("DEEPCATALOG_API_TOKEN", generate_api_token())
+    monkeypatch.delenv("DEEPCATALOG_TRUSTED_PROXIES", raising=False)
+    clear_all_sessions()
+
+    bare = TestClient(
+        app,
+        client=("203.0.113.10", 50000),
+        base_url="https://archive.example.com",
+    )
+    resp = bare.get("/api/inbox")
+    assert resp.status_code == 401
+    assert resp.headers.get("Content-Security-Policy") == CONTENT_SECURITY_POLICY
+    assert resp.headers.get("Strict-Transport-Security", "").startswith("max-age=")
+
+    http_bare = TestClient(
+        app,
+        client=("203.0.113.10", 50000),
+        base_url="http://archive.example.com",
+    )
+    http_resp = http_bare.get("/api/inbox")
+    # Remote credentials over HTTP are rejected before auth (403 HTTPS required)
+    # or 401 — either way must not advertise HSTS on cleartext.
+    assert http_resp.status_code in {401, 403}
+    assert "Strict-Transport-Security" not in http_resp.headers

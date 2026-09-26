@@ -10,6 +10,7 @@ from chromadb.api.client import SharedSystemClient
 
 from deepcatalog import config
 from deepcatalog.chroma_local import embedded_chroma_client
+from deepcatalog.env_permissions import ensure_private_directory
 from deepcatalog.settings import get_source_dir, load_settings
 from deepcatalog.tools.filesystem import SUPPORTED_SUFFIXES, clear_inbox
 from deepcatalog.tools.metadata_db import init_db, list_recent
@@ -134,6 +135,7 @@ def clear_all_stored_data() -> dict[str, Any]:
     except Exception:
         pass
     chroma_dir.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(chroma_dir, under=data_dir)
 
     return {
         "status": "success",

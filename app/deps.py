@@ -72,12 +72,26 @@ def origin_matches_host_header(origin: str, host_header: str | None) -> bool:
 
 
 def request_passes_csrf(request: Request) -> bool:
-    """Custom header, or a same-origin browser POST (WebKitGTK drops FormData headers)."""
+    """
+    CSRF gate for cookie/Bearer authenticated mutations.
+
+    Accept when any of:
+    - ``X-Requested-With: DeepCatalog`` (SPA / machine clients; not settable by
+      classic cross-site form posts without a CORS preflight this app never grants)
+    - Fetch Metadata ``Sec-Fetch-Site: same-origin`` only (WebKitGTK FormData may
+      drop custom headers; same-origin is still a true same-document origin)
+    - ``Origin`` host[:port] exactly matches ``Host`` (and Host is allowlisted)
+
+    ``Sec-Fetch-Site: same-site`` is **not** trusted: a compromised sibling
+    subdomain (evil.example.com → catalog.example.com) is same-site but must
+    still pass Origin/Host or the custom header.
+    """
     if request.headers.get(CSRF_HEADER_NAME) == CSRF_HEADER_VALUE:
         return True
     site = (request.headers.get("sec-fetch-site") or "").strip().lower()
-    if site in {"same-origin", "same-site"}:
+    if site == "same-origin":
         return True
+    # same-site / cross-site / none / missing → explicit Origin ↔ Host check.
     return origin_matches_host_header(
         request.headers.get("origin") or "",
         request.headers.get("host"),

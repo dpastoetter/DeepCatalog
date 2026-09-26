@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "description": "Chroma HTTP-server advisories deferred for PR/release pip-audit. DeepCatalog uses embedded PersistentClient only (deepcatalog/chroma_local.py). Weekly scripts/chroma-advisory-watch.py runs without these ignores.",
+  "suppressions": [
+    {
+      "id": "PYSEC-2026-311",
+      "cve": "CVE-2026-45829",
+      "aliases": ["GHSA-f4j7-r4q5-qw2c"],
+      "summary": "Pre-auth RCE / code injection in Chroma HTTP/FastAPI server (1.0.0–1.5.9).",
+      "rationale": "Affects Chroma's HTTP server surface. DeepCatalog never constructs HttpClient or starts a Chroma listener; it only uses chromadb.PersistentClient with RustBindingsAPI via deepcatalog.chroma_local.",
+      "compensating_control": "tests/test_chroma_no_http.py + chroma_local.reject_http_chroma_settings",
+      "reviewed": "2026-09-26",
+      "expires": "2026-12-26"
+    },
+    {
+      "id": "GHSA-f4j7-r4q5-qw2c",
+      "cve": "CVE-2026-45829",
+      "aliases": ["PYSEC-2026-311"],
+      "summary": "GitHub advisory alias for CVE-2026-45829 (Chroma HTTP server).",
+      "rationale": "Same HTTP-server RCE as PYSEC-2026-311. pip-audit may report either ID; both are suppressed with the same embedded-client compensating control.",
+      "compensating_control": "tests/test_chroma_no_http.py + chroma_local.reject_http_chroma_settings",
+      "reviewed": "2026-09-26",
+      "expires": "2026-12-26"
+    },
+    {
+      "id": "PYSEC-2026-3813",
+      "cve": "CVE-2026-45830",
+      "aliases": [],
+      "summary": "Chroma HTTP/FastAPI server advisory in the 1.0.0–1.5.9 range.",
+      "rationale": "Server-mode advisory. DeepCatalog does not bind CHROMA_SERVER_* or use FastAPI/HttpClient; embedded PersistentClient only.",
+      "compensating_control": "tests/test_chroma_no_http.py + chroma_local.reject_http_chroma_settings",
+      "reviewed": "2026-09-26",
+      "expires": "2026-12-26"
+    },
+    {
+      "id": "PYSEC-2026-3814",
+      "cve": "CVE-2026-45832",
+      "aliases": [],
+      "summary": "Chroma HTTP/FastAPI server advisory in the 1.0.0–1.5.9 range.",
+      "rationale": "Server-mode advisory. DeepCatalog does not expose Chroma over the network; vectors stay in data/chroma via PersistentClient.",
+      "compensating_control": "tests/test_chroma_no_http.py + chroma_local.reject_http_chroma_settings",
+      "reviewed": "2026-09-26",
+      "expires": "2026-12-26"
+    },
+    {
+      "id": "PYSEC-2026-3815",
+      "cve": "CVE-2026-45833",
+      "aliases": [],
+      "summary": "Authenticated injection in Chroma HTTP/FastAPI server (1.0.0–1.5.9).",
+      "rationale": "Requires Chroma's HTTP API. DeepCatalog never starts that server and rejects chroma_api_impl FastAPI / server host-port settings at client construction.",
+      "compensating_control": "tests/test_chroma_no_http.py + chroma_local.reject_http_chroma_settings",
+      "reviewed": "2026-09-26",
+      "expires": "2026-12-26"
+    }
+  ]
+}

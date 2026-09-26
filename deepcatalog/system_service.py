@@ -149,6 +149,100 @@ def _extra_environment_lines() -> list[str]:
     return lines
 
 
+def _strict_systemd_enabled() -> bool:
+    """Opt-in tighter sandbox; may need DEEPCATALOG_SYSTEMD_READWRITE_PATHS."""
+    return os.getenv("DEEPCATALOG_SYSTEMD_STRICT", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _extra_readwrite_paths() -> list[str]:
+    """Colon-separated absolute paths the strict profile must remain able to write."""
+    raw = os.getenv("DEEPCATALOG_SYSTEMD_READWRITE_PATHS", "").strip()
+    if not raw:
+        return []
+    paths: list[str] = []
+    for part in raw.split(":"):
+        part = part.strip()
+        if not part:
+            continue
+        paths.append(str(Path(part).expanduser()))
+    return paths
+
+
+def _hardening_directives(*, appimage: bool, workdir: Path) -> list[str]:
+    """Return systemd sandbox directives safe for default DeepCatalog installs.
+
+    Enabled by default (why safe):
+    - UMask=0077 — new files owner-only; matches DATA_DIR 0700/0600 policy
+    - NoNewPrivileges=true — blocks privilege escalation; media_worker also sets
+      PR_SET_NO_NEW_PRIVS in-process
+    - PrivateTmp=true — private /tmp; media_worker already uses its own TMPDIR
+    - ProtectControlGroups/KernelTunables/KernelModules/Hostname/Clock — service
+      never manages cgroups, sysctls, modules, hostname, or the system clock
+    - RestrictSUIDSGID=true — no SUID/SGID binaries needed for serve/Poppler
+    - LockPersonality=true — no personality(2) changes
+    - RestrictRealtime=true — no soft-RT scheduling
+    - ProtectSystem=full — /usr and /boot read-only; home and DATA_DIR stay writable
+      so user-configured inbox/archive paths under $HOME keep working
+    - RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 — loopback UI, Ollama,
+      HTTPS updates/integrations; no raw/netlink sockets
+
+    Intentionally NOT enabled by default:
+    - ProtectHome — would hide or freeze $HOME and break archive/inbox under home
+    - PrivateDevices — AppImage needs /dev/fuse; Poppler does not need host devices
+      beyond what PrivateDevices provides, but FUSE breaks headless AppImage start
+    - RestrictNamespaces — would block media_worker's best-effort CLONE_NEWNET
+    - SystemCallFilter / MemoryDenyWriteExecute — can break chromadb native code
+      or Poppler; available only via DEEPCATALOG_SYSTEMD_STRICT=1
+    - ProtectSystem=strict — needs explicit ReadWritePaths for every archive root
+    """
+    # ProtectSystem: default `full` keeps $HOME writable for user archive/inbox
+    # roots. Strict mode switches to `strict` + explicit ReadWritePaths.
+    protect_system = "strict" if _strict_systemd_enabled() else "full"
+    lines = [
+        "UMask=0077",
+        "NoNewPrivileges=true",
+        "PrivateTmp=true",
+        f"ProtectSystem={protect_system}",
+        "ProtectControlGroups=true",
+        "ProtectKernelTunables=true",
+        "ProtectKernelModules=true",
+        "ProtectHostname=true",
+        "ProtectClock=true",
+        "RestrictSUIDSGID=true",
+        "LockPersonality=true",
+        "RestrictRealtime=true",
+        "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+    ]
+    if _strict_systemd_enabled():
+        # Opt-in: tighter FS + optional device/W^X filters. Callers must list
+        # every writable archive/inbox path in DEEPCATALOG_SYSTEMD_READWRITE_PATHS.
+        rw: list[str] = [str(Path(config.DATA_DIR).expanduser())]
+        root = Path(config.PROJECT_ROOT).expanduser()
+        if str(root) not in rw:
+            rw.append(str(root))
+        wd = Path(workdir).expanduser()
+        if str(wd) not in rw:
+            rw.append(str(wd))
+        for extra in _extra_readwrite_paths():
+            if extra not in rw:
+                rw.append(extra)
+        lines.append(f"ReadWritePaths={' '.join(rw)}")
+        # RestrictNamespaces is still omitted: media_worker netns is best-effort
+        # and useful when the user has unprivileged user namespaces.
+        lines.append("MemoryDenyWriteExecute=true")
+        if not appimage:
+            # AppImage runtime needs /dev/fuse; venv installs do not.
+            lines.append("PrivateDevices=true")
+        lines.append("SystemCallFilter=@system-service @network-io")
+        lines.append("SystemCallErrorNumber=EPERM")
+    return lines
+
+
 def render_unit_file() -> str:
     """Render the systemd user unit for the current install."""
     appimage = appimage_exec_path()
@@ -156,27 +250,13 @@ def render_unit_file() -> str:
     port = service_port()
     env_lines = "\n".join(_extra_environment_lines())
     if appimage:
-        workdir = config.DATA_DIR
+        workdir = Path(config.DATA_DIR)
         exec_start = f"{appimage} --headless --host {host} --port {port}"
-        return f"""[Unit]
-Description=DeepCatalog — deep document intelligence, local-first.
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory={workdir}
-{env_lines}
-ExecStart={exec_start}
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-"""
-
-    python = venv_python()
-    workdir = config.PROJECT_ROOT
+    else:
+        workdir = Path(config.PROJECT_ROOT)
+        python = venv_python()
+        exec_start = f"{python} -m deepcatalog.serve --host {host} --port {port}"
+    harden = "\n".join(_hardening_directives(appimage=bool(appimage), workdir=workdir))
     return f"""[Unit]
 Description=DeepCatalog — deep document intelligence, local-first.
 After=network-online.target
@@ -185,8 +265,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory={workdir}
+{harden}
 {env_lines}
-ExecStart={python} -m deepcatalog.serve --host {host} --port {port}
+ExecStart={exec_start}
 Restart=on-failure
 RestartSec=5
 

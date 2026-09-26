@@ -16,6 +16,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -40,7 +41,9 @@ GITHUB_CONNECT_TIMEOUT = 12.0
 GITHUB_READ_TIMEOUT = 45.0
 GITHUB_DOWNLOAD_READ_TIMEOUT = 180.0
 GITHUB_MAX_ATTEMPTS = 4
+_MAX_REDIRECTS = 10
 _RETRYABLE_HTTP_STATUS = frozenset({429, 502, 503, 504})
+_REDIRECT_STATUS = frozenset({301, 302, 303, 307, 308})
 _RETRYABLE_EXCEPTIONS = (
     httpx.ConnectError,
     httpx.ReadTimeout,
@@ -49,9 +52,72 @@ _RETRYABLE_EXCEPTIONS = (
     httpx.RemoteProtocolError,
 )
 
+# Stream buffer — large enough to limit syscalls, small enough to bound peak RAM.
+DOWNLOAD_CHUNK_SIZE = 64 * 1024
+
+# Size ceilings (override via env). Chosen so real releases fit; abuse is rejected.
+# Manifest: compact JSON with a handful of artifact digests (~1–4 KiB typical).
+DEFAULT_MAX_MANIFEST_BYTES = 256 * 1024
+# Signature: Ed25519 is 64 raw bytes / 128 hex chars; allow a small envelope.
+DEFAULT_MAX_SIGNATURE_BYTES = 4 * 1024
+# GitHub release/tag JSON (notes + asset list) — not the binary payload.
+DEFAULT_MAX_RELEASE_METADATA_BYTES = 2 * 1024 * 1024
+# Source tarball or AppImage. AppImages with a bundled runtime can be large;
+# 512 MiB leaves headroom without allowing multi-GB DoS into /tmp.
+DEFAULT_MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
+
+# Hosts GitHub may redirect release downloads through (HTTPS only).
+_GITHUB_DOWNLOAD_HOSTS = frozenset(
+    {
+        "github.com",
+        "api.github.com",
+        "codeload.github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+        "github-releases.githubusercontent.com",
+    }
+)
+
 # Never overwritten by an update: user data, credentials, environments.
 # Matched case-insensitively so a tarball cannot sneak past with Data/ or .ENV.
 PROTECTED_TOP_LEVEL = {"data", ".env", ".venv", "venv", ".git", "node_modules"}
+
+
+class DownloadTooLargeError(ValueError):
+    """Remote body exceeds the configured size ceiling."""
+
+
+class DownloadRedirectError(ValueError):
+    """Redirect target is not an allowed HTTPS GitHub/CDN host."""
+
+
+def _env_byte_limit(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(1024, int(raw))
+    except ValueError:
+        return default
+
+
+def max_manifest_bytes() -> int:
+    return _env_byte_limit("DEEPCATALOG_UPDATE_MAX_MANIFEST_BYTES", DEFAULT_MAX_MANIFEST_BYTES)
+
+
+def max_signature_bytes() -> int:
+    return _env_byte_limit("DEEPCATALOG_UPDATE_MAX_SIGNATURE_BYTES", DEFAULT_MAX_SIGNATURE_BYTES)
+
+
+def max_release_metadata_bytes() -> int:
+    return _env_byte_limit(
+        "DEEPCATALOG_UPDATE_MAX_METADATA_BYTES",
+        DEFAULT_MAX_RELEASE_METADATA_BYTES,
+    )
+
+
+def max_artifact_bytes() -> int:
+    return _env_byte_limit("DEEPCATALOG_UPDATE_MAX_ARTIFACT_BYTES", DEFAULT_MAX_ARTIFACT_BYTES)
 
 
 def parse_version(value: str) -> tuple[int, ...]:
@@ -84,6 +150,108 @@ def _github_timeout(*, read: float | None = None) -> httpx.Timeout:
     )
 
 
+def is_allowed_update_url(url: str) -> bool:
+    """True for HTTPS URLs on GitHub API / release / CDN hosts only."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme != "https":
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    if host in _GITHUB_DOWNLOAD_HOSTS:
+        return True
+    return host.endswith(".githubusercontent.com")
+
+
+def _assert_allowed_update_url(url: str) -> None:
+    if not is_allowed_update_url(url):
+        raise DownloadRedirectError(f"refusing non-GitHub or non-HTTPS update URL: {url!r}")
+
+
+def _content_length(headers: httpx.Headers | dict[str, str]) -> int | None:
+    raw = headers.get("Content-Length") if hasattr(headers, "get") else None
+    if raw is None:
+        return None
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if value < 0:
+        return None
+    return value
+
+
+def _reject_declared_length(headers: httpx.Headers | dict[str, str], max_bytes: int) -> None:
+    declared = _content_length(headers)
+    if declared is not None and declared > max_bytes:
+        raise DownloadTooLargeError(f"Content-Length {declared} exceeds limit of {max_bytes} bytes")
+
+
+def _stream_response_to_file(
+    resp: httpx.Response,
+    dest: Path,
+    *,
+    max_bytes: int,
+    chunk_size: int = DOWNLOAD_CHUNK_SIZE,
+) -> tuple[int, str]:
+    """
+    Write ``resp`` body to ``dest``, hashing as we go.
+
+    Enforces ``max_bytes`` even when Content-Length is missing or lying.
+    """
+    _reject_declared_length(resp.headers, max_bytes)
+    hasher = hashlib.sha256()
+    total = 0
+    with dest.open("wb") as handle:
+        for chunk in resp.iter_bytes(chunk_size):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > max_bytes:
+                raise DownloadTooLargeError(f"download exceeded limit of {max_bytes} bytes")
+            hasher.update(chunk)
+            handle.write(chunk)
+    return total, hasher.hexdigest()
+
+
+def _read_body_limited(resp: httpx.Response, *, max_bytes: int) -> bytes:
+    """
+    Return response body if it fits ``max_bytes``.
+
+    Prefers streaming when available so a lying/missing Content-Length cannot
+    force unbounded RAM use. Falls back to ``resp.content`` for simple test doubles.
+    """
+    _reject_declared_length(resp.headers, max_bytes)
+    if getattr(resp, "is_stream_consumed", False) or not hasattr(resp, "iter_bytes"):
+        data = resp.content
+        if len(data) > max_bytes:
+            raise DownloadTooLargeError(f"download exceeded limit of {max_bytes} bytes")
+        return data
+    # httpx Response always has iter_bytes; use it for real responses that were
+    # not yet fully read. If content was already eagerly loaded, iter_bytes still works.
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in resp.iter_bytes(DOWNLOAD_CHUNK_SIZE):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > max_bytes:
+            raise DownloadTooLargeError(f"download exceeded limit of {max_bytes} bytes")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _follow_redirect_url(current: str, location: str | None) -> str:
+    if not location:
+        raise DownloadRedirectError("redirect missing Location header")
+    nxt = urljoin(current, location.strip())
+    _assert_allowed_update_url(nxt)
+    return nxt
+
+
 def _github_get(
     client: httpx.Client,
     url: str,
@@ -91,18 +259,36 @@ def _github_get(
     headers: dict[str, str] | None = None,
     params: dict[str, Any] | None = None,
 ) -> httpx.Response:
-    """GET with retries for flaky GitHub / CDN connections."""
+    """GET with retries; HTTPS + GitHub-host redirects only."""
     merged = {**_github_headers(), **(headers or {})}
     last_exc: Exception | None = None
+    current_url = url
+    current_params = params
+    redirects = 0
     for attempt in range(GITHUB_MAX_ATTEMPTS):
         try:
-            resp = client.get(url, headers=merged, params=params)
+            while True:
+                _assert_allowed_update_url(current_url)
+                resp = client.get(
+                    current_url,
+                    headers=merged,
+                    params=current_params,
+                    follow_redirects=False,
+                )
+                if resp.status_code in _REDIRECT_STATUS:
+                    if redirects >= _MAX_REDIRECTS:
+                        raise DownloadRedirectError("too many redirects")
+                    redirects += 1
+                    current_url = _follow_redirect_url(current_url, resp.headers.get("Location"))
+                    current_params = None
+                    continue
+                break
             if resp.status_code in _RETRYABLE_HTTP_STATUS and attempt < GITHUB_MAX_ATTEMPTS - 1:
                 retry_after = resp.headers.get("Retry-After")
                 delay = float(retry_after) if retry_after and retry_after.isdigit() else 2**attempt
                 logger.warning(
                     "GitHub GET %s returned %s; retrying in %.1fs (attempt %s/%s)",
-                    url,
+                    current_url,
                     resp.status_code,
                     delay,
                     attempt + 1,
@@ -118,7 +304,7 @@ def _github_get(
             delay = 2**attempt
             logger.warning(
                 "GitHub GET %s failed (%s); retrying in %.1fs (attempt %s/%s)",
-                url,
+                current_url,
                 exc,
                 delay,
                 attempt + 1,
@@ -199,14 +385,29 @@ def _pick_named_asset(assets: list[dict[str, Any]], filename: str) -> dict[str, 
     return None
 
 
-def _download_asset_bytes(client: httpx.Client, asset: dict[str, Any]) -> bytes | None:
+def _download_asset_bytes(
+    client: httpx.Client,
+    asset: dict[str, Any],
+    *,
+    max_bytes: int,
+) -> bytes | None:
     url = _asset_url(asset)
     if not url:
+        return None
+    try:
+        _assert_allowed_update_url(url)
+    except DownloadRedirectError:
         return None
     resp = _github_get(client, url, headers=_github_headers(accept="application/octet-stream"))
     if not resp.is_success:
         return None
-    return resp.content
+    try:
+        return _read_body_limited(resp, max_bytes=max_bytes)
+    except DownloadTooLargeError:
+        logger.warning(
+            "Release asset %s exceeded size limit (%s bytes)", asset.get("name"), max_bytes
+        )
+        return None
 
 
 def _unsigned_release_error() -> str:
@@ -283,8 +484,8 @@ def _load_signed_manifest(
     sig_asset = _pick_named_asset(assets, MANIFEST_SIG_NAME)
     if manifest_asset is None or sig_asset is None:
         return None, _unsigned_release_error()
-    manifest_bytes = _download_asset_bytes(client, manifest_asset)
-    sig_bytes = _download_asset_bytes(client, sig_asset)
+    manifest_bytes = _download_asset_bytes(client, manifest_asset, max_bytes=max_manifest_bytes())
+    sig_bytes = _download_asset_bytes(client, sig_asset, max_bytes=max_signature_bytes())
     if manifest_bytes is None or sig_bytes is None:
         return None, "Could not download the signed release manifest."
     try:
@@ -298,12 +499,20 @@ def _load_signed_manifest(
     return manifest, None
 
 
+def _ensure_buffered_within_limit(resp: httpx.Response, *, max_bytes: int) -> None:
+    """Reject oversized Content-Length or already-buffered bodies (API JSON)."""
+    _reject_declared_length(resp.headers, max_bytes)
+    content = getattr(resp, "content", None)
+    if isinstance(content, (bytes, bytearray)) and len(content) > max_bytes:
+        raise DownloadTooLargeError(f"download exceeded limit of {max_bytes} bytes")
+
+
 def _fetch_latest_release() -> dict[str, Any] | None:
     """Latest GitHub release with a signed manifest (checksum-only releases are not installable)."""
     repo = update_repo()
     with httpx.Client(
         timeout=_github_timeout(),
-        follow_redirects=True,
+        follow_redirects=False,
     ) as client:
         resp = _github_get(client, f"{GITHUB_API}/repos/{repo}/releases/latest")
         if resp.status_code == 404:
@@ -314,6 +523,10 @@ def _fetch_latest_release() -> dict[str, Any] | None:
                 params={"per_page": 1},
             )
             resp.raise_for_status()
+            try:
+                _ensure_buffered_within_limit(resp, max_bytes=max_release_metadata_bytes())
+            except DownloadTooLargeError:
+                return None
             tags = resp.json()
             if not tags:
                 return None
@@ -338,6 +551,11 @@ def _fetch_latest_release() -> dict[str, Any] | None:
                 ),
             }
         resp.raise_for_status()
+        try:
+            _ensure_buffered_within_limit(resp, max_bytes=max_release_metadata_bytes())
+        except DownloadTooLargeError as exc:
+            logger.warning("Release metadata too large: %s", exc)
+            return None
         data = resp.json()
         tag = data.get("tag_name") or ""
         assets = data.get("assets") or []
@@ -518,18 +736,83 @@ def check_for_update() -> dict[str, Any]:
     }
 
 
-def _download_bytes(url: str) -> bytes:
-    with httpx.Client(
+def download_to_tempfile(
+    url: str,
+    *,
+    max_bytes: int,
+    client: httpx.Client | None = None,
+    chunk_size: int = DOWNLOAD_CHUNK_SIZE,
+) -> tuple[Path, str, int]:
+    """
+    Stream ``url`` to a private temp file while computing SHA-256.
+
+    Returns ``(path, sha256_hex, size)``. Caller must delete ``path``.
+    Incomplete files are removed before the exception propagates.
+    """
+    _assert_allowed_update_url(url)
+    fd, tmp_name = tempfile.mkstemp(prefix="deepcatalog-dl-", suffix=".bin")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    owns_client = client is None
+    http = client or httpx.Client(
         timeout=_github_timeout(read=GITHUB_DOWNLOAD_READ_TIMEOUT),
-        follow_redirects=True,
-    ) as client:
-        resp = _github_get(
-            client,
-            url,
-            headers=_github_headers(accept="application/octet-stream"),
-        )
-        resp.raise_for_status()
-        return resp.content
+        follow_redirects=False,
+    )
+    current = url
+    redirects = 0
+    try:
+        while True:
+            _assert_allowed_update_url(current)
+            with http.stream(
+                "GET",
+                current,
+                headers=_github_headers(accept="application/octet-stream"),
+                follow_redirects=False,
+            ) as resp:
+                if resp.status_code in _REDIRECT_STATUS:
+                    if redirects >= _MAX_REDIRECTS:
+                        raise DownloadRedirectError("too many redirects")
+                    redirects += 1
+                    current = _follow_redirect_url(current, resp.headers.get("Location"))
+                    continue
+                if resp.status_code in _RETRYABLE_HTTP_STATUS:
+                    resp.raise_for_status()
+                resp.raise_for_status()
+                size, digest = _stream_response_to_file(
+                    resp,
+                    tmp_path,
+                    max_bytes=max_bytes,
+                    chunk_size=chunk_size,
+                )
+                return tmp_path, digest, size
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    finally:
+        if owns_client:
+            http.close()
+
+
+def _download_bytes(url: str, *, max_bytes: int | None = None) -> bytes:
+    """
+    Download a small-or-medium URL into memory with size limits.
+
+    Prefer ``download_to_tempfile`` for release payloads (AppImage / tarball).
+    """
+    limit = max_artifact_bytes() if max_bytes is None else max_bytes
+    path: Path | None = None
+    try:
+        path, _digest, _size = download_to_tempfile(url, max_bytes=limit)
+        return path.read_bytes()
+    finally:
+        if path is not None:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def verify_sha256(data: bytes, expected_hex: str) -> None:
@@ -538,6 +821,20 @@ def verify_sha256(data: bytes, expected_hex: str) -> None:
     if not re.fullmatch(r"[a-f0-9]{64}", expected):
         raise ValueError("invalid expected SHA-256 digest")
     actual = sha256_hex(data)
+    if not hmac.compare_digest(actual, expected):
+        raise ValueError(
+            f"SHA-256 mismatch (expected {expected[:12]}…, got {actual[:12]}…) — update aborted"
+        )
+
+
+def verify_sha256_digest(actual_hex: str, expected_hex: str) -> None:
+    """Compare two hex digests (incremental download vs manifest)."""
+    expected = (expected_hex or "").strip().lower()
+    actual = (actual_hex or "").strip().lower()
+    if not re.fullmatch(r"[a-f0-9]{64}", expected):
+        raise ValueError("invalid expected SHA-256 digest")
+    if not re.fullmatch(r"[a-f0-9]{64}", actual):
+        raise ValueError("invalid actual SHA-256 digest")
     if not hmac.compare_digest(actual, expected):
         raise ValueError(
             f"SHA-256 mismatch (expected {expected[:12]}…, got {actual[:12]}…) — update aborted"
@@ -589,7 +886,7 @@ def _parse_release_commit_file(path: Path) -> str | None:
 
 
 def apply_tarball(
-    tar_bytes: bytes,
+    tar_source: bytes | Path,
     *,
     commit_sha: str | None = None,
     expect_commit_match: bool = False,
@@ -611,8 +908,12 @@ def apply_tarball(
     removed: list[str] = []
     with tempfile.TemporaryDirectory(prefix="deepcatalog-update-") as tmp:
         tmp_path = Path(tmp)
-        with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:*") as tar:
-            tar.extractall(tmp_path, filter="data")
+        if isinstance(tar_source, Path):
+            with tarfile.open(tar_source, mode="r:*") as tar:
+                tar.extractall(tmp_path, filter="data")
+        else:
+            with tarfile.open(fileobj=io.BytesIO(tar_source), mode="r:*") as tar:
+                tar.extractall(tmp_path, filter="data")
 
         # GitHub / release tarballs wrap everything in a single root directory.
         entries = [p for p in tmp_path.iterdir() if p.is_dir()]
@@ -706,12 +1007,12 @@ def apply_tarball(
     }
 
 
-def apply_appimage_bytes(image_bytes: bytes, *, target: Path) -> dict[str, Any]:
+def apply_appimage_bytes(image_source: bytes | Path, *, target: Path) -> dict[str, Any]:
     """
-    Replace the on-disk AppImage at ``target`` with ``image_bytes``.
+    Replace the on-disk AppImage at ``target`` with ``image_source``.
 
     Writes a sibling temp file then ``os.replace`` so the running process can
-    keep its mounted squashfs until relaunch.
+    keep its mounted squashfs until relaunch. Accepts bytes or a verified path.
     """
     parent = target.parent
     fd, tmp_name = tempfile.mkstemp(
@@ -722,7 +1023,11 @@ def apply_appimage_bytes(image_bytes: bytes, *, target: Path) -> dict[str, Any]:
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as handle:
-            handle.write(image_bytes)
+            if isinstance(image_source, Path):
+                with image_source.open("rb") as src:
+                    shutil.copyfileobj(src, handle, DOWNLOAD_CHUNK_SIZE)
+            else:
+                handle.write(image_source)
             handle.flush()
             os.fsync(handle.fileno())
         tmp_path.chmod(0o755)
@@ -790,32 +1095,52 @@ def apply_update() -> dict[str, Any]:
                     "AppImage path is missing or not writable — cannot replace this file in place."
                 ),
             }
+        artifact_path: Path | None = None
         try:
-            image_bytes = _download_bytes(info["download_url"])
-        except httpx.HTTPError as exc:
-            logger.warning("AppImage update download failed: %s", type(exc).__name__)
+            try:
+                artifact_path, digest, _size = download_to_tempfile(
+                    info["download_url"],
+                    max_bytes=max_artifact_bytes(),
+                )
+            except DownloadTooLargeError:
+                logger.warning("AppImage update rejected: payload too large")
+                return {
+                    "status": "error",
+                    "error": "Download failed: release artifact exceeds size limit.",
+                }
+            except (httpx.HTTPError, DownloadRedirectError, OSError) as exc:
+                logger.warning("AppImage update download failed: %s", type(exc).__name__)
+                return {
+                    "status": "error",
+                    "error": "Download failed. Check your network and try again.",
+                }
+            try:
+                verify_sha256_digest(digest, info["expected_sha256"])
+            except ValueError:
+                logger.exception("AppImage SHA-256 verification failed")
+                return {
+                    "status": "error",
+                    "error": "Release verification failed (SHA-256 mismatch)",
+                }
+            result = apply_appimage_bytes(artifact_path, target=target)
+            if result.get("status") != "success":
+                return result
             return {
-                "status": "error",
-                "error": "Download failed. Check your network and try again.",
+                **result,
+                "installed_version": info.get("latest_version"),
+                "previous_version": info["current_version"],
+                "verified_sha256": info["expected_sha256"],
+                "verified_commit": info.get("manifest_commit"),
+                "artifact_name": info.get("artifact_name"),
+                "artifact_kind": "appimage",
+                "restart_required": True,
             }
-        try:
-            verify_sha256(image_bytes, info["expected_sha256"])
-        except ValueError:
-            logger.exception("AppImage SHA-256 verification failed")
-            return {"status": "error", "error": "Release verification failed (SHA-256 mismatch)"}
-        result = apply_appimage_bytes(image_bytes, target=target)
-        if result.get("status") != "success":
-            return result
-        return {
-            **result,
-            "installed_version": info.get("latest_version"),
-            "previous_version": info["current_version"],
-            "verified_sha256": info["expected_sha256"],
-            "verified_commit": info.get("manifest_commit"),
-            "artifact_name": info.get("artifact_name"),
-            "artifact_kind": "appimage",
-            "restart_required": True,
-        }
+        finally:
+            if artifact_path is not None:
+                try:
+                    artifact_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     if not info.get("manifest_commit"):
         return {
@@ -824,33 +1149,56 @@ def apply_update() -> dict[str, Any]:
             or "Refusing to install an unsigned release (checksums are not authentic).",
         }
 
+    artifact_path = None
     try:
-        tar_bytes = _download_bytes(info["download_url"])
-    except httpx.HTTPError as exc:
-        logger.warning("update download failed: %s", type(exc).__name__)
-        return {"status": "error", "error": "Download failed. Check your network and try again."}
+        try:
+            artifact_path, digest, _size = download_to_tempfile(
+                info["download_url"],
+                max_bytes=max_artifact_bytes(),
+            )
+        except DownloadTooLargeError:
+            logger.warning("update rejected: payload too large")
+            return {
+                "status": "error",
+                "error": "Download failed: release artifact exceeds size limit.",
+            }
+        except (httpx.HTTPError, DownloadRedirectError, OSError) as exc:
+            logger.warning("update download failed: %s", type(exc).__name__)
+            return {
+                "status": "error",
+                "error": "Download failed. Check your network and try again.",
+            }
 
-    try:
-        verify_sha256(tar_bytes, info["expected_sha256"])
-    except ValueError:
-        logger.exception("update SHA-256 verification failed")
-        return {"status": "error", "error": "Release verification failed (SHA-256 mismatch)"}
+        try:
+            verify_sha256_digest(digest, info["expected_sha256"])
+        except ValueError:
+            logger.exception("update SHA-256 verification failed")
+            return {"status": "error", "error": "Release verification failed (SHA-256 mismatch)"}
 
-    # Integrity: Ed25519 manifest + SHA-256 of these bytes + packed .release-commit.
-    result = apply_tarball(tar_bytes, expected_release_commit=str(info["manifest_commit"]))
-    if result.get("status") != "success":
-        return result
+        # Integrity: Ed25519 manifest + SHA-256 of these bytes + packed .release-commit.
+        result = apply_tarball(
+            artifact_path,
+            expected_release_commit=str(info["manifest_commit"]),
+        )
+        if result.get("status") != "success":
+            return result
 
-    return {
-        **result,
-        "installed_version": info.get("latest_version"),
-        "previous_version": info["current_version"],
-        "verified_sha256": info["expected_sha256"],
-        "verified_commit": info.get("manifest_commit"),
-        "artifact_name": info.get("artifact_name"),
-        "artifact_kind": "tarball",
-        "restart_required": True,
-    }
+        return {
+            **result,
+            "installed_version": info.get("latest_version"),
+            "previous_version": info["current_version"],
+            "verified_sha256": info["expected_sha256"],
+            "verified_commit": info.get("manifest_commit"),
+            "artifact_name": info.get("artifact_name"),
+            "artifact_kind": "tarball",
+            "restart_required": True,
+        }
+    finally:
+        if artifact_path is not None:
+            try:
+                artifact_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def schedule_restart(delay_seconds: float = 0.75) -> dict[str, Any]:

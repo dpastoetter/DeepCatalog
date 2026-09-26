@@ -13,14 +13,28 @@ from chromadb.config import Settings
 # must only ever construct an on-disk embedded client.
 _HTTP_API_MARKERS = ("fastapi", "chromadb.api.fastapi", "httpclient")
 
+# Explicit allowlist of embedded implementations. Expand only after security review.
+APPROVED_EMBEDDED_API_IMPLS = frozenset(
+    {
+        "chromadb.api.rust.RustBindingsAPI",
+    }
+)
+
 
 def reject_http_chroma_settings(settings: Settings) -> None:
     """Fail closed if settings would use or bind Chroma's HTTP/gRPC server."""
-    impl = (settings.chroma_api_impl or "").strip().lower()
-    if any(marker in impl for marker in _HTTP_API_MARKERS):
+    impl = (settings.chroma_api_impl or "").strip()
+    impl_l = impl.lower()
+    if any(marker in impl_l for marker in _HTTP_API_MARKERS):
         raise RuntimeError(
             f"Refusing Chroma HTTP API implementation {settings.chroma_api_impl!r}. "
             "DeepCatalog only uses embedded PersistentClient."
+        )
+    approved = {name.lower() for name in APPROVED_EMBEDDED_API_IMPLS}
+    if not impl_l or impl_l not in approved:
+        raise RuntimeError(
+            f"Refusing unapproved Chroma API implementation {settings.chroma_api_impl!r}. "
+            f"Expected one of: {sorted(APPROVED_EMBEDDED_API_IMPLS)}"
         )
     if settings.chroma_server_host or settings.chroma_server_http_port:
         raise RuntimeError(

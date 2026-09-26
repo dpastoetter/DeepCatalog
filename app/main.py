@@ -49,6 +49,7 @@ from deepcatalog.local_security import (
     remote_auth_must_be_https,
     single_user_desktop_enabled,
 )
+from deepcatalog.media_worker import refuse_inprocess_media_in_network_mode
 from deepcatalog.review import recover_stale_processing
 from deepcatalog.sessions import (
     attach_session_cookie,
@@ -70,7 +71,12 @@ logger = logging.getLogger(__name__)
 
 
 def _secure(request: Request, response: HTMLResponse | JSONResponse | Any) -> Any:
-    """Attach browser hardening headers, including opt-in HSTS when appropriate."""
+    """Attach browser hardening headers, including opt-in HSTS when appropriate.
+
+    HTTPS detection uses ``request_is_https`` (direct scheme or trusted-proxy
+    ``X-Forwarded-Proto`` only). Host comes from the request Host header so
+    loopback names never receive HSTS.
+    """
     return apply_browser_security_headers(
         response,
         https=request_is_https(request),
@@ -83,6 +89,7 @@ async def lifespan(_app: FastAPI):
     ensure_data_dirs()
     ensure_dotenv_permissions(fix=True)
     ensure_api_token()
+    refuse_inprocess_media_in_network_mode()
     install_access_log_redaction()
     assert_bind_allowed(effective_bind_host())
     load_settings()

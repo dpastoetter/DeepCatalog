@@ -25,16 +25,20 @@ from packaging.version import InvalidVersion, Version
 ROOT = Path(__file__).resolve().parent.parent
 CONSTRAINTS_PATH = ROOT / "constraints.txt"
 AUDIT_SCRIPT_PATH = ROOT / "scripts" / "dependency-audit.sh"
+SUPPRESSIONS_PATH = ROOT / "scripts" / "chroma_vuln_suppressions.json"
 CHROMA_PACKAGES = frozenset({"chromadb", "chroma-hnswlib"})
 PYPI_CHROMADB = "https://pypi.org/pypi/chromadb/json"
 _PIN_RE = re.compile(r"^chromadb==([0-9][^\s#]+)", re.MULTILINE)
-_CHROMA_IGNORE_FLAGS = (
-    "PYSEC-2026-311",
-    "GHSA-f4j7-r4q5-qw2c",
-    "PYSEC-2026-3813",
-    "PYSEC-2026-3814",
-    "PYSEC-2026-3815",
-)
+
+
+def chroma_ignore_ids(path: Path = SUPPRESSIONS_PATH) -> tuple[str, ...]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    rows = payload.get("suppressions") or []
+    ids = [str(row.get("id") or "").strip() for row in rows if isinstance(row, dict)]
+    return tuple(vid for vid in ids if vid)
+
+
+_CHROMA_IGNORE_FLAGS = chroma_ignore_ids()
 
 
 def pinned_chromadb_version(text: str) -> str:

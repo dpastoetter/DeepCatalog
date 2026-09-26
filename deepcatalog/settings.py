@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from deepcatalog import config
+from deepcatalog.env_permissions import ensure_private_directory, write_secret_text
 
 SETTINGS_FILENAME = "settings.json"
 
@@ -62,7 +63,15 @@ def _normalize_path(value: str) -> Path:
         raise ValueError("invalid path")
     # Owner-configured storage root (authenticated Settings). Dangerous
     # prefixes are refused in refuse_dangerous_storage_path / validate_settings.
-    return Path(raw).expanduser().resolve()  # codeql[py/path-injection]
+    path = Path(raw).expanduser()
+    try:
+        # Refuse a final-component symlink so validate/load cannot retarget a
+        # category or inbox root through an attacker-planted link.
+        if path.is_symlink():
+            raise ValueError(f"path must not be a symlink: {path}")
+    except OSError as exc:
+        raise ValueError(f"invalid path: {exc}") from exc
+    return path.resolve()  # codeql[py/path-injection]
 
 
 # Exact home children that must never be used as inbox or category roots.
@@ -244,10 +253,15 @@ def validate_settings(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def ensure_settings_dirs(settings: dict[str, Any]) -> None:
-    """Create source and category folders from validated settings."""
-    Path(settings["source_dir"]).mkdir(parents=True, exist_ok=True)
+    """Create source and category folders from validated settings.
+
+    Paths under ``DATA_DIR`` are tightened to ``0700``. User-configured folders
+    outside ``DATA_DIR`` are created if missing but never chmod'd.
+    """
+    data_root = Path(config.DATA_DIR).expanduser()
+    ensure_private_directory(Path(settings["source_dir"]), under=data_root)
     for cat in settings["categories"]:
-        Path(cat["folder"]).mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(Path(cat["folder"]), under=data_root)
 
 
 def _read_existing_file(path: Path) -> dict[str, Any]:
@@ -277,10 +291,7 @@ def _read_existing_file(path: Path) -> dict[str, Any]:
 def _write_file(settings: dict[str, Any]) -> None:
     config.ensure_data_dirs()
     path = settings_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(settings, indent=2, sort_keys=False) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    write_secret_text(path, json.dumps(settings, indent=2, sort_keys=False))
 
 
 def load_settings(*, reload: bool = False) -> dict[str, Any]:

@@ -20,6 +20,7 @@ from deepcatalog.config import (
     RETRIEVE_TOP_K,
     ensure_data_dirs,
 )
+from deepcatalog.env_permissions import write_secret_text
 from deepcatalog.ollama_setup import (
     ensure_ollama_ready,
     format_http_error,
@@ -85,8 +86,7 @@ def _load_index_meta() -> dict[str, Any] | None:
 
 def _write_index_meta(meta: dict[str, Any]) -> None:
     ensure_data_dirs()
-    path = _meta_path()
-    path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_secret_text(_meta_path(), json.dumps(meta, indent=2, sort_keys=True))
 
 
 _CTRL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")

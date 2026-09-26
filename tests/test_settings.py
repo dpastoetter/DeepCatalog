@@ -44,6 +44,26 @@ def test_default_settings_created(isolated_settings):
     assert (isolated_settings / "settings.json").exists()
 
 
+def test_validate_settings_rejects_symlink_folder(isolated_settings):
+    real = isolated_settings / "real_cat"
+    real.mkdir(parents=True)
+    link = isolated_settings / "link_cat"
+    try:
+        link.symlink_to(real)
+    except OSError:
+        pytest.skip("symlinks not available")
+    with pytest.raises(ValueError, match="symlink"):
+        save_settings(
+            {
+                "source_dir": str(isolated_settings / "inbox"),
+                "categories": [
+                    {"name": "other", "folder": str(link)},
+                ],
+                "batch": {"poll_interval_seconds": 30},
+            }
+        )
+
+
 def test_save_and_get_source_dir(isolated_settings):
     custom_inbox = isolated_settings / "scans"
     custom_invoice = isolated_settings / "filed" / "invoices"

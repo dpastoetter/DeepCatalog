@@ -8,9 +8,11 @@ import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from deepcatalog.config import DB_PATH, ensure_data_dirs
+from deepcatalog.env_permissions import harden_app_owned_file
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +101,10 @@ def _connect() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA synchronous=NORMAL")
+    # SQLite creates files under the process umask; re-assert owner-only modes.
+    harden_app_owned_file(DB_PATH)
+    harden_app_owned_file(Path(str(DB_PATH) + "-wal"))
+    harden_app_owned_file(Path(str(DB_PATH) + "-shm"))
     return conn
 
 

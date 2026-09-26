@@ -196,8 +196,7 @@ MEDIA_WORKER_CPU_S = _env_int("DEEPCATALOG_MEDIA_WORKER_CPU_S", 120)
 
 
 def ensure_data_dirs() -> None:
-    """Create local storage directories if missing."""
-    INBOX_DIR.mkdir(parents=True, exist_ok=True)
-    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    """Create local storage directories with owner-only modes under DATA_DIR."""
+    from deepcatalog.env_permissions import ensure_app_data_permissions
+
+    ensure_app_data_permissions()

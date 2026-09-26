@@ -94,10 +94,15 @@ def hsts_header_value(*, https: bool, host_header: str | None) -> str | None:
 def apply_browser_security_headers(
     response: Any,
     *,
-    https: bool = False,
-    host_header: str | None = None,
+    https: bool,
+    host_header: str | None,
 ) -> Any:
-    """Attach hardening headers without overwriting an explicit caller value."""
+    """
+    Attach hardening headers without overwriting an explicit caller value.
+
+    ``https`` and ``host_header`` are required so callers cannot silently omit
+    request context (HSTS must not default to off-by-forgetting).
+    """
     headers = getattr(response, "headers", None)
     if headers is None:
         return response

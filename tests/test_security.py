@@ -66,12 +66,87 @@ def test_csrf_same_origin_browser_post_allows_upload(isolated_data):
     assert resp.json()["filename"] == "scan.pdf"
 
 
+def test_csrf_same_origin_process_inbox_succeeds(isolated_data):
+    bare = TestClient(app)
+    apply_test_client_auth(bare)
+    bare.headers.pop(CSRF_HEADER_NAME, None)
+    resp = bare.post(
+        "/api/process-inbox",
+        headers={
+            "Origin": "http://testserver",
+            "Sec-Fetch-Site": "same-origin",
+        },
+    )
+    assert resp.status_code == 200
+
+
+def test_csrf_same_site_sibling_subdomain_is_rejected(isolated_data, monkeypatch):
+    """same-site ≠ same-origin: evil.example.com must not mutate catalog.example.com."""
+    monkeypatch.setenv("DEEPCATALOG_ALLOWED_HOSTS", "catalog.example.com")
+    bare = TestClient(
+        app,
+        base_url="https://catalog.example.com",
+        client=("203.0.113.9", 50000),
+    )
+    apply_test_client_auth(bare)
+    bare.headers.pop(CSRF_HEADER_NAME, None)
+    resp = bare.post(
+        "/api/process-inbox",
+        headers={
+            "Host": "catalog.example.com",
+            "Origin": "https://evil.example.com",
+            "Sec-Fetch-Site": "same-site",
+        },
+    )
+    assert resp.status_code == 403
+    assert "cross-site" in resp.json()["detail"]
+
+
 def test_csrf_matching_origin_without_fetch_metadata_allows_mutation(isolated_data):
     bare = TestClient(app)
     apply_test_client_auth(bare)
     bare.headers.pop(CSRF_HEADER_NAME, None)
     resp = bare.post("/api/process-inbox", headers={"Origin": "http://testserver"})
     assert resp.status_code == 200
+
+
+def test_csrf_valid_origin_matching_host_on_public_hostname(isolated_data, monkeypatch):
+    monkeypatch.setenv("DEEPCATALOG_ALLOWED_HOSTS", "catalog.example.com")
+    bare = TestClient(
+        app,
+        base_url="https://catalog.example.com",
+        client=("203.0.113.9", 50000),
+    )
+    apply_test_client_auth(bare)
+    bare.headers.pop(CSRF_HEADER_NAME, None)
+    resp = bare.post(
+        "/api/process-inbox",
+        headers={
+            "Host": "catalog.example.com",
+            "Origin": "https://catalog.example.com",
+        },
+    )
+    assert resp.status_code == 200
+
+
+def test_csrf_invalid_origin_is_rejected(isolated_data, monkeypatch):
+    monkeypatch.setenv("DEEPCATALOG_ALLOWED_HOSTS", "catalog.example.com")
+    bare = TestClient(
+        app,
+        base_url="https://catalog.example.com",
+        client=("203.0.113.9", 50000),
+    )
+    apply_test_client_auth(bare)
+    bare.headers.pop(CSRF_HEADER_NAME, None)
+    resp = bare.post(
+        "/api/process-inbox",
+        headers={
+            "Host": "catalog.example.com",
+            "Origin": "https://evil.example.com",
+        },
+    )
+    assert resp.status_code == 403
+    assert "cross-site" in resp.json()["detail"]
 
 
 def test_csrf_cross_site_origin_is_blocked(isolated_data):
@@ -84,6 +159,86 @@ def test_csrf_cross_site_origin_is_blocked(isolated_data):
     )
     assert resp.status_code == 403
     assert "cross-site" in resp.json()["detail"]
+
+
+def test_csrf_same_site_alone_does_not_pass_helper(monkeypatch):
+    """Unit: Sec-Fetch-Site same-site without matching Origin must fail."""
+    from starlette.requests import Request
+
+    from app.deps import request_passes_csrf
+
+    monkeypatch.setenv("DEEPCATALOG_ALLOWED_HOSTS", "catalog.example.com")
+
+    def make(headers: dict[str, str]) -> Request:
+        return Request(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "https",
+                "path": "/api/process-inbox",
+                "raw_path": b"/api/process-inbox",
+                "query_string": b"",
+                "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+                "client": ("203.0.113.9", 50000),
+                "server": ("catalog.example.com", 443),
+            }
+        )
+
+    assert request_passes_csrf(
+        make(
+            {
+                "host": "catalog.example.com",
+                "origin": "https://catalog.example.com",
+                "sec-fetch-site": "same-origin",
+            }
+        )
+    )
+    assert not request_passes_csrf(
+        make(
+            {
+                "host": "catalog.example.com",
+                "origin": "https://evil.example.com",
+                "sec-fetch-site": "same-site",
+            }
+        )
+    )
+    assert not request_passes_csrf(
+        make(
+            {
+                "host": "catalog.example.com",
+                "origin": "https://evil.example.com",
+                "sec-fetch-site": "cross-site",
+            }
+        )
+    )
+    assert request_passes_csrf(
+        make(
+            {
+                "host": "catalog.example.com",
+                "origin": "https://catalog.example.com",
+            }
+        )
+    )
+    assert not request_passes_csrf(
+        make(
+            {
+                "host": "catalog.example.com",
+                "origin": "https://evil.example.com",
+            }
+        )
+    )
+    assert request_passes_csrf(
+        make(
+            {
+                "host": "catalog.example.com",
+                "x-requested-with": "DeepCatalog",
+                "sec-fetch-site": "same-site",
+                "origin": "https://evil.example.com",
+            }
+        )
+    )
 
 
 def test_origin_matches_host_header():

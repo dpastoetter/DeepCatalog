@@ -4,6 +4,9 @@
 #   ./scripts/dependency-audit.sh
 #
 # Used by CI/release workflows. Keep ignores documented and minimal.
+# Chroma HTTP-server advisories are suppressed via
+# scripts/chroma_vuln_suppressions.json (rationale + review expiry). That file
+# is the source of truth; this script fails if a suppression has expired.
 
 set -euo pipefail
 
@@ -26,25 +29,27 @@ fail() {
   exit 1
 }
 
+echo "[0/2] chroma vuln suppression expiry"
+"$PY" scripts/check_chroma_suppressions.py \
+  || fail "chroma vuln suppressions expired or out of sync (see scripts/chroma_vuln_suppressions.json)"
+
+mapfile -t CHROMA_IGNORE_ARGS < <("$PY" scripts/check_chroma_suppressions.py --pip-audit-args)
+if [ "${#CHROMA_IGNORE_ARGS[@]}" -eq 0 ]; then
+  fail "no Chroma --ignore-vuln flags from check_chroma_suppressions.py"
+fi
+
 echo "[1/2] pip-audit (OSV)"
 "$PY" -m pip install -q pip-audit
-# chromadb HTTP/FastAPI server advisories (CVE-2026-45829 / 45830 / 45832 / 45833
-# and related PYSEC IDs). DeepCatalog only constructs embedded PersistentClient
-# (see deepcatalog/chroma_local.py) and never starts Chroma's HTTP listener.
-# These ignores are for PR/release CI only — the weekly unsuppressed scan is
-# scripts/chroma-advisory-watch.py (.github/workflows/advisory-watch.yml).
-# Drop them when a release newer than 1.5.9 lands on PyPI.
+# Ignore IDs come from scripts/chroma_vuln_suppressions.json (HTTP-server CVEs;
+# DeepCatalog uses embedded PersistentClient only — see deepcatalog/chroma_local.py).
+# Weekly unsuppressed scan: scripts/chroma-advisory-watch.py.
 if command -v pip-audit >/dev/null 2>&1; then
   AUDIT=(pip-audit)
 else
   AUDIT=("$PY" -m pip_audit)
 fi
 "${AUDIT[@]}" --progress-spinner off \
-  --ignore-vuln PYSEC-2026-311 \
-  --ignore-vuln GHSA-f4j7-r4q5-qw2c \
-  --ignore-vuln PYSEC-2026-3813 \
-  --ignore-vuln PYSEC-2026-3814 \
-  --ignore-vuln PYSEC-2026-3815 \
+  "${CHROMA_IGNORE_ARGS[@]}" \
   || fail "pip-audit found vulnerabilities"
 
 echo "[2/2] npm audit"

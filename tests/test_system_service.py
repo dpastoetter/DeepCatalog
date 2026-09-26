@@ -6,6 +6,41 @@ from unittest.mock import MagicMock
 
 from deepcatalog import system_service
 
+# Default unit sandbox — must stay present so upgrades rewrite older soft units.
+_DEFAULT_HARDENING = (
+    "UMask=0077",
+    "NoNewPrivileges=true",
+    "PrivateTmp=true",
+    "ProtectSystem=full",
+    "ProtectControlGroups=true",
+    "ProtectKernelTunables=true",
+    "ProtectKernelModules=true",
+    "ProtectHostname=true",
+    "ProtectClock=true",
+    "RestrictSUIDSGID=true",
+    "LockPersonality=true",
+    "RestrictRealtime=true",
+    "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+)
+
+# Must never appear in the default (non-strict) unit — they break home archives,
+# AppImage FUSE, media netns, or native extensions without an allowlist.
+_FORBIDDEN_IN_DEFAULT = (
+    "ProtectHome=",
+    "PrivateDevices=",
+    "ProtectSystem=strict",
+    "MemoryDenyWriteExecute=",
+    "SystemCallFilter=",
+    "RestrictNamespaces=",
+)
+
+
+def _assert_default_hardening(text: str) -> None:
+    for line in _DEFAULT_HARDENING:
+        assert line in text, f"missing hardening directive: {line}"
+    for marker in _FORBIDDEN_IN_DEFAULT:
+        assert marker not in text, f"unexpected restrictive directive: {marker}"
+
 
 def test_render_unit_file_includes_paths(tmp_path, monkeypatch):
     project = tmp_path / "app"
@@ -16,6 +51,7 @@ def test_render_unit_file_includes_paths(tmp_path, monkeypatch):
     (venv_bin / "uvicorn").write_text("#!/bin/sh\n", encoding="utf-8")
     monkeypatch.setenv("DEEPCATALOG_HOST", "127.0.0.1")
     monkeypatch.setenv("DEEPCATALOG_PORT", "8080")
+    monkeypatch.delenv("DEEPCATALOG_SYSTEMD_STRICT", raising=False)
     monkeypatch.setattr(system_service.config, "PROJECT_ROOT", project)
     monkeypatch.setattr(system_service.config, "DATA_DIR", project / "data")
 
@@ -25,6 +61,7 @@ def test_render_unit_file_includes_paths(tmp_path, monkeypatch):
         f"ExecStart={venv_bin / 'python'} -m deepcatalog.serve --host 127.0.0.1 --port 8080" in text
     )
     assert "Environment=DEEPCATALOG_SYSTEMD=1" in text
+    _assert_default_hardening(text)
     assert "WantedBy=default.target" in text
 
 
@@ -37,6 +74,7 @@ def test_render_unit_file_appimage(tmp_path, monkeypatch):
     monkeypatch.setenv("DEEPCATALOG_APPIMAGE", "1")
     monkeypatch.setenv("DEEPCATALOG_HOST", "127.0.0.1")
     monkeypatch.setenv("DEEPCATALOG_PORT", "8080")
+    monkeypatch.delenv("DEEPCATALOG_SYSTEMD_STRICT", raising=False)
     monkeypatch.setattr(system_service.config, "PROJECT_ROOT", tmp_path / "opt")
     monkeypatch.setattr(system_service.config, "DATA_DIR", data)
 
@@ -44,7 +82,55 @@ def test_render_unit_file_appimage(tmp_path, monkeypatch):
     assert f"ExecStart={image} --headless --host 127.0.0.1 --port 8080" in text
     assert f"WorkingDirectory={data}" in text
     assert "Environment=DEEPCATALOG_APPIMAGE=1" in text
+    _assert_default_hardening(text)
+    assert "PrivateDevices=" not in text
     assert "uvicorn" not in text
+
+
+def test_render_unit_file_strict_venv_adds_allowlisted_paths(tmp_path, monkeypatch):
+    project = tmp_path / "app"
+    project.mkdir()
+    data = project / "data"
+    data.mkdir()
+    archive = tmp_path / "Documents" / "filing"
+    archive.mkdir(parents=True)
+    venv_bin = project / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setenv("DEEPCATALOG_HOST", "127.0.0.1")
+    monkeypatch.setenv("DEEPCATALOG_PORT", "8080")
+    monkeypatch.setenv("DEEPCATALOG_SYSTEMD_STRICT", "1")
+    monkeypatch.setenv("DEEPCATALOG_SYSTEMD_READWRITE_PATHS", str(archive))
+    monkeypatch.setattr(system_service.config, "PROJECT_ROOT", project)
+    monkeypatch.setattr(system_service.config, "DATA_DIR", data)
+
+    text = system_service.render_unit_file()
+    assert "ProtectSystem=strict" in text
+    assert "ProtectSystem=full" not in text
+    assert f"ReadWritePaths={data} {project} {archive}" in text
+    assert "PrivateDevices=true" in text
+    assert "MemoryDenyWriteExecute=true" in text
+    assert "SystemCallFilter=@system-service @network-io" in text
+    assert "ProtectHome=" not in text
+    assert "RestrictNamespaces=" not in text
+
+
+def test_render_unit_file_strict_appimage_skips_private_devices(tmp_path, monkeypatch):
+    image = tmp_path / "DeepCatalog.AppImage"
+    image.write_bytes(b"fake")
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("APPIMAGE", str(image))
+    monkeypatch.setenv("DEEPCATALOG_APPIMAGE", "1")
+    monkeypatch.setenv("DEEPCATALOG_SYSTEMD_STRICT", "1")
+    monkeypatch.setattr(system_service.config, "PROJECT_ROOT", tmp_path / "opt")
+    monkeypatch.setattr(system_service.config, "DATA_DIR", data)
+
+    text = system_service.render_unit_file()
+    assert "ProtectSystem=strict" in text
+    assert "PrivateDevices=" not in text
+    assert f"ReadWritePaths={data}" in text
+    assert str(tmp_path / "opt") in text.split("ReadWritePaths=", 1)[1].split("\n", 1)[0]
 
 
 def test_autostart_status_unsupported_on_non_linux(monkeypatch):
@@ -90,9 +176,9 @@ def test_set_autostart_enable_writes_unit_and_enables(tmp_path, monkeypatch):
     result = system_service.set_autostart(True)
     assert result["status"] == "success"
     assert unit_file.is_file()
-    assert "DeepCatalog — deep document intelligence, local-first." in unit_file.read_text(
-        encoding="utf-8"
-    )
+    written = unit_file.read_text(encoding="utf-8")
+    assert "DeepCatalog — deep document intelligence, local-first." in written
+    _assert_default_hardening(written)
     assert ["daemon-reload"] in calls
     assert ["enable", system_service.UNIT_NAME] in calls
     assert ["start", system_service.UNIT_NAME] in calls

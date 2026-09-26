@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from deepcatalog import config
+from deepcatalog.env_permissions import write_secret_text
 
 # Bump when the disclaimer text changes so users must re-approve.
 CLOUD_DISCLAIMER_VERSION = "1"
@@ -46,11 +47,7 @@ def _read() -> dict[str, Any]:
 
 def _write(data: dict[str, Any]) -> None:
     config.ensure_data_dirs()
-    path = privacy_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    write_secret_text(privacy_path(), json.dumps(data, indent=2, sort_keys=True))
 
 
 def load_privacy(*, reload: bool = False) -> dict[str, Any]:

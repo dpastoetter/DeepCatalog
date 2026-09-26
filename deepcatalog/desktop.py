@@ -23,7 +23,11 @@ import uvicorn
 from dotenv import load_dotenv
 
 from deepcatalog.desktop_bootstrap import mint_desktop_bootstrap
-from deepcatalog.env_permissions import harden_secret_file, write_secret_text
+from deepcatalog.env_permissions import (
+    ensure_app_data_permissions,
+    harden_secret_file,
+    write_secret_text,
+)
 from deepcatalog.local_security import (
     assert_bind_allowed,
     port_probe_host,
@@ -80,10 +84,7 @@ def _prepare_environment() -> Path:
     """Ensure DATA_DIR / optional per-user .env are ready before importing the app."""
     data_dir = Path(os.environ.get("DATA_DIR", _default_data_dir())).expanduser()
     os.environ["DATA_DIR"] = str(data_dir.resolve())
-    data_dir.mkdir(parents=True, exist_ok=True)
-    (data_dir / "inbox").mkdir(parents=True, exist_ok=True)
-    (data_dir / "archive").mkdir(parents=True, exist_ok=True)
-    (data_dir / "chroma").mkdir(parents=True, exist_ok=True)
+    ensure_app_data_permissions(data_root=data_dir)
 
     env_file = data_dir / ".env"
     example = _project_root() / ".env.example"

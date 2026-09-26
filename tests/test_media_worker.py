@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import multiprocessing as mp
 import shutil
 import time
@@ -16,16 +17,22 @@ from PIL import Image
 from tests.media_fixtures import write_minimal_pdf, write_minimal_png
 
 from deepcatalog.media_worker import (
+    MediaSandboxReport,
     MediaWorkerError,
     MediaWorkerLimits,
     _apply_resource_limits,
     _default_limits,
+    _harden_worker_process,
     _worker_main,
     extract_pdf_page_texts_isolated,
     load_image_rgb_png_isolated,
+    media_sandbox_capabilities,
     media_worker_enabled,
+    refuse_inprocess_media_in_network_mode,
     render_pdf_page_png_isolated,
     run_media_job,
+    sanitize_worker_environ,
+    warn_if_media_worker_disabled,
 )
 from deepcatalog.ocr import render_document_page
 
@@ -100,10 +107,14 @@ class _CaptureConn:
 
 @pytest.fixture
 def no_parent_resource_limits(monkeypatch):
-    """Never apply RLIMIT_* in the pytest process when exercising `_worker_main` inline."""
+    """Never apply RLIMIT_* / env wipe in the pytest process when exercising `_worker_main`."""
+
+    def stub_harden(_limits: MediaWorkerLimits):
+        return MediaSandboxReport(isolated_process=False, notes=["test inline harden"]), None
+
     monkeypatch.setattr(
-        "deepcatalog.media_worker._apply_resource_limits",
-        lambda _limits: None,
+        "deepcatalog.media_worker._harden_worker_process",
+        stub_harden,
     )
 
 
@@ -152,6 +163,163 @@ def test_apply_resource_limits_calls_setrlimit(monkeypatch):
     kinds = {c[0] for c in calls}
     assert resource_mod.RLIMIT_CPU in kinds
     assert resource_mod.RLIMIT_AS in kinds
+    assert resource_mod.RLIMIT_NOFILE in kinds
+    assert resource_mod.RLIMIT_NPROC not in kinds
+    cpu = next(c for c in calls if c[0] == resource_mod.RLIMIT_CPU)
+    assert cpu[1] == (5, 6)
+    mem = next(c for c in calls if c[0] == resource_mod.RLIMIT_AS)
+    assert mem[1] == (256 * 1024 * 1024, 256 * 1024 * 1024)
+
+
+# --- environment sanitization / sandbox report -----------------------------
+
+
+def test_sanitize_worker_environ_strips_secrets_and_sets_tmpdir():
+    source = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/home/user",
+        "LANG": "en_US.UTF-8",
+        "LC_ALL": "en_US.UTF-8",
+        "OPENAI_API_KEY": "sk-secret",
+        "ANTHROPIC_API_KEY": "sk-ant",
+        "AWS_SECRET_ACCESS_KEY": "aws-secret",
+        "DEEPCATALOG_API_TOKEN": "tok",
+        "CODEX_API_KEY": "codex",
+        "MY_BEARER_TOKEN": "bearer",
+        "RANDOM_CLOUD_CREDENTIAL": "cred",
+        "LD_PRELOAD": "/evil.so",
+        "UNRELATED_CONFIG": "drop-me",
+        "TMPDIR": "/tmp/parent",
+    }
+    cleaned = sanitize_worker_environ(source, tmpdir="/tmp/private-media")
+    assert cleaned["PATH"] == "/usr/bin:/bin"
+    assert cleaned["HOME"] == "/home/user"
+    assert cleaned["LANG"] == "en_US.UTF-8"
+    assert cleaned["LC_ALL"] == "en_US.UTF-8"
+    assert cleaned["TMPDIR"] == "/tmp/private-media"
+    assert cleaned["TMP"] == "/tmp/private-media"
+    assert cleaned["TEMP"] == "/tmp/private-media"
+    assert "OPENAI_API_KEY" not in cleaned
+    assert "ANTHROPIC_API_KEY" not in cleaned
+    assert "AWS_SECRET_ACCESS_KEY" not in cleaned
+    assert "DEEPCATALOG_API_TOKEN" not in cleaned
+    assert "CODEX_API_KEY" not in cleaned
+    assert "MY_BEARER_TOKEN" not in cleaned
+    assert "RANDOM_CLOUD_CREDENTIAL" not in cleaned
+    assert "LD_PRELOAD" not in cleaned
+    assert "UNRELATED_CONFIG" not in cleaned
+
+
+def test_sanitize_worker_environ_denies_secret_named_keys():
+    dirty = sanitize_worker_environ(
+        {
+            "PATH": "/bin",
+            "OPENAI_API_KEY": "x",
+            "SESSION_COOKIE": "y",
+            "FONTCONFIG_PATH": "/etc/fonts",
+        }
+    )
+    assert dirty["PATH"] == "/bin"
+    assert dirty["FONTCONFIG_PATH"] == "/etc/fonts"
+    assert "OPENAI_API_KEY" not in dirty
+    assert "SESSION_COOKIE" not in dirty
+
+
+def test_media_sandbox_capabilities_are_honest():
+    caps = media_sandbox_capabilities()
+    assert caps["intended"]["landlock"] is False
+    assert caps["intended"]["bubblewrap"] is False
+    assert caps["intended"]["env_sanitized"] is True
+    assert caps["intended"]["private_tmpdir"] is True
+    assert any("network" in n.lower() for n in caps["notes"])
+
+
+def test_harden_worker_process_private_tmpdir_and_report(monkeypatch, tmp_path):
+    replaced: dict[str, str] = {}
+
+    def fake_replace(env: dict[str, str]) -> None:
+        replaced.clear()
+        replaced.update(env)
+
+    monkeypatch.setattr("deepcatalog.media_worker._replace_process_environ", fake_replace)
+    monkeypatch.setattr("deepcatalog.media_worker._apply_resource_limits", lambda _l: None)
+    monkeypatch.setattr("deepcatalog.media_worker._try_no_new_privileges", lambda: True)
+    monkeypatch.setattr("deepcatalog.media_worker._try_unshare_net", lambda: False)
+    monkeypatch.setattr(
+        "deepcatalog.media_worker.tempfile.mkdtemp",
+        lambda prefix="": str(tmp_path / "deepcatalog-media-test"),
+    )
+    (tmp_path / "deepcatalog-media-test").mkdir()
+
+    limits = MediaWorkerLimits(timeout_s=5, memory_bytes=64 * 1024 * 1024, cpu_seconds=5)
+    report, tmpdir = _harden_worker_process(limits)
+    assert tmpdir is not None
+    assert report.private_tmpdir is True
+    assert report.env_sanitized is True
+    assert report.resource_limits is True
+    assert report.no_new_privileges is True
+    assert report.network_namespace is False
+    assert report.landlock is False
+    assert report.bubblewrap is False
+    assert replaced["TMPDIR"] == tmpdir
+    assert "OPENAI_API_KEY" not in replaced
+    assert any("network namespace unavailable" in n for n in report.notes)
+    assert any("Landlock/bubblewrap not enabled" in n for n in report.notes)
+
+
+def test_refuse_inprocess_media_when_allow_remote(monkeypatch):
+    monkeypatch.setenv("DEEPCATALOG_MEDIA_WORKER", "0")
+    monkeypatch.setattr("deepcatalog.media_worker.allow_remote_enabled", lambda: True)
+    monkeypatch.setattr("deepcatalog.media_worker.effective_bind_host", lambda: "127.0.0.1")
+    monkeypatch.setattr(
+        "deepcatalog.media_worker.is_wildcard_or_non_loopback_bind",
+        lambda _h: False,
+    )
+    with pytest.raises(RuntimeError, match="refused for network"):
+        refuse_inprocess_media_in_network_mode()
+
+
+def test_refuse_inprocess_media_when_non_loopback_bind(monkeypatch):
+    monkeypatch.setenv("DEEPCATALOG_MEDIA_WORKER", "0")
+    monkeypatch.setattr("deepcatalog.media_worker.allow_remote_enabled", lambda: False)
+    monkeypatch.setattr("deepcatalog.media_worker.effective_bind_host", lambda: "0.0.0.0")
+    monkeypatch.setattr(
+        "deepcatalog.media_worker.is_wildcard_or_non_loopback_bind",
+        lambda h: h == "0.0.0.0",
+    )
+    with pytest.raises(RuntimeError, match="refused for network"):
+        refuse_inprocess_media_in_network_mode()
+
+
+def test_warn_inprocess_media_on_loopback_only(monkeypatch, caplog):
+    monkeypatch.setenv("DEEPCATALOG_MEDIA_WORKER", "0")
+    monkeypatch.setattr("deepcatalog.media_worker.allow_remote_enabled", lambda: False)
+    monkeypatch.setattr("deepcatalog.media_worker.effective_bind_host", lambda: "127.0.0.1")
+    monkeypatch.setattr(
+        "deepcatalog.media_worker.is_wildcard_or_non_loopback_bind",
+        lambda _h: False,
+    )
+    monkeypatch.setattr("deepcatalog.media_worker._inprocess_warned", False)
+    with caplog.at_level(logging.WARNING, logger="deepcatalog.media_worker"):
+        refuse_inprocess_media_in_network_mode()
+    assert any(
+        "SECURITY: DEEPCATALOG_MEDIA_WORKER is disabled" in r.message for r in caplog.records
+    )
+
+
+def test_refuse_noop_when_worker_enabled(monkeypatch):
+    monkeypatch.setenv("DEEPCATALOG_MEDIA_WORKER", "1")
+    refuse_inprocess_media_in_network_mode()  # must not raise
+
+
+def test_warn_if_media_worker_disabled_once(monkeypatch, caplog):
+    monkeypatch.setenv("DEEPCATALOG_MEDIA_WORKER", "0")
+    monkeypatch.setattr("deepcatalog.media_worker._inprocess_warned", False)
+    with caplog.at_level(logging.WARNING, logger="deepcatalog.media_worker"):
+        warn_if_media_worker_disabled()
+        warn_if_media_worker_disabled()
+    warnings = [r for r in caplog.records if "SECURITY: DEEPCATALOG_MEDIA_WORKER" in r.message]
+    assert len(warnings) == 1
 
 
 # --- in-process worker body ------------------------------------------------

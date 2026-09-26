@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from deepcatalog import config
+from deepcatalog.env_permissions import write_secret_text
 from deepcatalog.local_security import COOKIE_NAME, get_api_token, token_matches
 
 # Default 24h — long enough for a workday; override with DEEPCATALOG_SESSION_TTL_SECONDS.
@@ -57,10 +58,7 @@ def _load_unlocked() -> dict[str, Any]:
 
 def _save_unlocked(data: dict[str, Any]) -> None:
     path = _store_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    write_secret_text(path, json.dumps(data, indent=2, sort_keys=True))
 
 
 def _prune_unlocked(data: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:

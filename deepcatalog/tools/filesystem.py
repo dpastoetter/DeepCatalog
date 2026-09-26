@@ -6,12 +6,14 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import uuid
 from pathlib import Path
 from typing import Any
 
 from deepcatalog.config import ensure_data_dirs
+from deepcatalog.env_permissions import harden_app_owned_file, open_private_file
 from deepcatalog.media_validate import MediaValidationError, validate_scan_file
 from deepcatalog.media_worker import MediaWorkerError, extract_pdf_page_texts_isolated
 from deepcatalog.ollama_setup import host_desktop_env
@@ -26,9 +28,339 @@ UPLOAD_CHUNK_BYTES = 1024 * 1024  # 1 MiB stream chunks
 def path_is_within(path: Path, root: Path) -> bool:
     """True when ``path`` resolves under ``root`` (defense-in-depth helper)."""
     try:
-        return path.resolve().is_relative_to(root.resolve())
+        resolved = path.resolve()
+        base = root.resolve()
+        return resolved == base or resolved.is_relative_to(base)
     except (OSError, ValueError):
         return False
+
+
+def _posix_nofollow_supported() -> bool:
+    return os.name == "posix" and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+
+
+def _normalize_archive_year(year: str | None) -> str:
+    """Return a single path segment: ``YYYY`` or ``unknown`` (never ``..`` / separators)."""
+    year_part = (year or "unknown").strip()
+    # Reject traversal / multi-segment values before any YYYY extraction.
+    if (
+        not year_part
+        or year_part in {".", ".."}
+        or "/" in year_part
+        or "\\" in year_part
+        or Path(year_part).name != year_part
+    ):
+        return "unknown"
+    if year_part != "unknown" and not re.fullmatch(r"\d{4}", year_part):
+        match = re.fullmatch(r"(\d{4})(?:-\d{2}-\d{2})?", year_part)
+        year_part = match.group(1) if match else "unknown"
+    if year_part != "unknown" and not re.fullmatch(r"\d{4}", year_part):
+        return "unknown"
+    return year_part
+
+
+def _lexists(path: Path) -> bool:
+    try:
+        path.lstat()
+        return True
+    except OSError:
+        return False
+
+
+def _reject_symlink_path(path: Path, *, label: str) -> dict[str, Any] | None:
+    """Return an error dict when ``path`` exists as a symlink."""
+    try:
+        if path.is_symlink():
+            return {
+                "status": "error",
+                "error": (
+                    f"{label} is a symlink — refusing to follow archive destination links ({path})"
+                ),
+                "code": "symlink_escape",
+            }
+    except OSError as exc:
+        return {
+            "status": "error",
+            "error": f"could not inspect {label}: {exc}",
+            "code": "path_escape",
+        }
+    return None
+
+
+def _assert_resolved_under(path: Path, root: Path, *, label: str) -> Path | dict[str, Any]:
+    """Resolve ``path`` and require it stays under ``root`` via ``is_relative_to``."""
+    try:
+        resolved = path.resolve()
+        base = root.resolve()
+    except OSError as exc:
+        return {
+            "status": "error",
+            "error": f"could not resolve {label}: {exc}",
+            "code": "path_escape",
+        }
+    if not (resolved == base or resolved.is_relative_to(base)):
+        return {
+            "status": "error",
+            "error": f"{label} resolves outside the category archive root ({base})",
+            "code": "path_escape",
+        }
+    return resolved
+
+
+def _open_dir_nofollow(path: Path) -> int:
+    """Open a directory FD without following a final-component symlink."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    return os.open(path, flags)
+
+
+def _mkdir_child_nofollow(parent_fd: int, name: str, *, mode: int = 0o700) -> None:
+    try:
+        os.mkdir(name, mode, dir_fd=parent_fd)
+    except FileExistsError:
+        pass
+
+
+def _ensure_archive_year_dir(category_root: Path, year_part: str) -> Path | dict[str, Any]:
+    """
+    Ensure ``category_root / year_part`` is a real directory under ``category_root``.
+
+    Rejects category or year paths that are symlinks (including links that point
+    elsewhere inside the same tree) so destination writes never follow an
+    attacker-controlled link. On POSIX, creates/opens with ``O_NOFOLLOW``.
+    """
+    year_part = _normalize_archive_year(year_part)
+    try:
+        category = category_root.expanduser()
+    except OSError as exc:
+        return {
+            "status": "error",
+            "error": f"invalid category folder: {exc}",
+            "code": "path_escape",
+        }
+
+    err = _reject_symlink_path(category, label="category folder")
+    if err:
+        return err
+
+    try:
+        if not category.exists():
+            category.parent.mkdir(parents=True, exist_ok=True)
+            if _posix_nofollow_supported() and category.parent.is_dir():
+                parent_fd = _open_dir_nofollow(category.parent.resolve())
+                try:
+                    _mkdir_child_nofollow(parent_fd, category.name)
+                finally:
+                    os.close(parent_fd)
+            else:
+                category.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return {
+            "status": "error",
+            "error": f"could not create category folder: {exc}",
+            "code": "path_escape",
+        }
+
+    err = _reject_symlink_path(category, label="category folder")
+    if err:
+        return err
+    if not category.is_dir():
+        return {
+            "status": "error",
+            "error": f"category folder is not a directory: {category}",
+            "code": "path_escape",
+        }
+
+    try:
+        root_resolved = category.resolve()
+    except OSError as exc:
+        return {
+            "status": "error",
+            "error": f"could not resolve category folder: {exc}",
+            "code": "path_escape",
+        }
+
+    dest_dir = category / year_part
+    err = _reject_symlink_path(dest_dir, label="year directory")
+    if err:
+        return err
+
+    try:
+        if _posix_nofollow_supported():
+            cat_fd = _open_dir_nofollow(root_resolved)
+            try:
+                _mkdir_child_nofollow(cat_fd, year_part)
+                # Re-check: open year with O_NOFOLLOW (fails if it is a symlink).
+                year_fd = os.open(
+                    year_part,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=cat_fd,
+                )
+                os.close(year_fd)
+            finally:
+                os.close(cat_fd)
+        else:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # ELOOP / equivalent when a symlink appeared between check and open.
+        return {
+            "status": "error",
+            "error": f"could not create archive year directory securely: {exc}",
+            "code": "symlink_escape",
+        }
+
+    err = _reject_symlink_path(dest_dir, label="year directory")
+    if err:
+        return err
+
+    resolved_year = _assert_resolved_under(dest_dir, root_resolved, label="year directory")
+    if isinstance(resolved_year, dict):
+        return resolved_year
+    if not dest_dir.is_dir() or dest_dir.is_symlink():
+        return {
+            "status": "error",
+            "error": f"year directory is not a real directory: {dest_dir}",
+            "code": "symlink_escape",
+        }
+    return dest_dir
+
+
+def _unique_archive_destination(dest_dir: Path, safe_name: str) -> Path | dict[str, Any]:
+    """Pick ``dest_dir/safe_name``, skipping existing files and destination symlinks."""
+    stem = Path(safe_name).stem
+    suffix = Path(safe_name).suffix
+    for n in range(1, 10_000):
+        name = safe_name if n == 1 else f"{stem}_{n}{suffix}"
+        candidate = dest_dir / name
+        if not _lexists(candidate):
+            return candidate
+        try:
+            if candidate.is_symlink():
+                # Never write through or replace via an existing dest symlink name
+                # on the first attempt — keep scanning for a free name.
+                continue
+        except OSError:
+            continue
+    return {
+        "status": "error",
+        "error": "could not allocate a unique archive filename",
+        "code": "path_escape",
+    }
+
+
+def _place_file_in_archive_dir(
+    src: Path,
+    dest_dir: Path,
+    dest_name: str,
+    *,
+    delete_source: bool,
+) -> Path | dict[str, Any]:
+    """
+    Copy ``src`` into ``dest_dir/dest_name`` without following a dest symlink.
+
+    Uses a ``.part`` sibling then ``os.replace``. On POSIX, creation uses
+    ``O_NOFOLLOW`` relative to the year directory FD when available.
+    """
+    dest = dest_dir / dest_name
+    if Path(dest_name).name != dest_name or dest_name in {".", ".."}:
+        return {
+            "status": "error",
+            "error": "archive destination escapes year directory",
+            "code": "path_escape",
+        }
+    if not path_is_within(dest, dest_dir):
+        return {
+            "status": "error",
+            "error": "archive destination escapes year directory",
+            "code": "path_escape",
+        }
+    try:
+        if dest.is_symlink():
+            return {
+                "status": "error",
+                "error": f"archive destination is a symlink: {dest}",
+                "code": "symlink_escape",
+            }
+    except OSError as exc:
+        return {
+            "status": "error",
+            "error": f"could not inspect archive destination: {exc}",
+            "code": "path_escape",
+        }
+
+    partial_name = f".{dest_name}.{uuid.uuid4().hex}.part"
+    partial = dest_dir / partial_name
+
+    try:
+        if _posix_nofollow_supported():
+            dir_fd = _open_dir_nofollow(dest_dir.resolve())
+            try:
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                fd = os.open(partial_name, flags, 0o600, dir_fd=dir_fd)
+                try:
+                    with os.fdopen(fd, "wb") as out, src.open("rb") as inp:
+                        shutil.copyfileobj(inp, out, UPLOAD_CHUNK_BYTES)
+                        out.flush()
+                        os.fsync(out.fileno())
+                except Exception:
+                    try:
+                        os.unlink(partial_name, dir_fd=dir_fd)
+                    except OSError:
+                        pass
+                    raise
+                try:
+                    st = os.lstat(dest_name, dir_fd=dir_fd)
+                    if stat.S_ISLNK(st.st_mode):
+                        os.unlink(partial_name, dir_fd=dir_fd)
+                        return {
+                            "status": "error",
+                            "error": f"archive destination is a symlink: {dest}",
+                            "code": "symlink_escape",
+                        }
+                except FileNotFoundError:
+                    pass
+                os.replace(partial_name, dest_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            finally:
+                os.close(dir_fd)
+        else:
+            with open_private_file(partial, binary=True) as out, src.open("rb") as inp:
+                shutil.copyfileobj(inp, out, UPLOAD_CHUNK_BYTES)
+                out.flush()
+                os.fsync(out.fileno())
+            if dest.is_symlink():
+                partial.unlink(missing_ok=True)
+                return {
+                    "status": "error",
+                    "error": f"archive destination is a symlink: {dest}",
+                    "code": "symlink_escape",
+                }
+            os.replace(str(partial), str(dest))
+    except OSError as exc:
+        partial.unlink(missing_ok=True)
+        return {
+            "status": "error",
+            "error": f"could not file document: {exc}",
+            "code": "io_error",
+        }
+
+    if delete_source:
+        try:
+            src.unlink(missing_ok=True)
+        except OSError as exc:
+            return {
+                "status": "error",
+                "error": f"archived but could not remove inbox source: {exc}",
+                "code": "io_error",
+                "archive_path": str(dest.resolve()),
+            }
+
+    final = _assert_resolved_under(dest, dest_dir, label="archive file")
+    if isinstance(final, dict):
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return final
+    return dest
 
 
 def confined_inbox_file(user_path: str) -> Path:
@@ -484,6 +816,10 @@ def move_to_archive(
     Category folders come from Setup settings; unknown types fall back to 'other'.
     Uses a numeric suffix if the destination already exists.
 
+    Destination directories that are symlinks (or resolve outside the category
+    root) are rejected so a local attacker cannot redirect filing via the
+    archive tree. On POSIX, year directories are created/opened with ``O_NOFOLLOW``.
+
     With delete_source=False the file is copied instead of moved, so the caller
     can commit metadata first and only then remove the source (atomic filing).
     """
@@ -493,52 +829,53 @@ def move_to_archive(
     src = confined
 
     safe_type = _safe_stem(doc_type or "other").lower()
-    year_part = year or "unknown"
-    if year_part != "unknown" and not re.fullmatch(r"\d{4}", year_part):
-        # Accept YYYY-MM-DD and extract year
-        match = re.match(r"(\d{4})", year_part)
-        year_part = match.group(1) if match else "unknown"
+    year_part = _normalize_archive_year(year)
 
     category_root = get_folder_for_category(safe_type)
-    dest_dir = category_root / year_part
+    dest_dir = _ensure_archive_year_dir(category_root, year_part)
+    if isinstance(dest_dir, dict):
+        return dest_dir
 
     safe_name = Path(filename).name
-    try:
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / safe_name
-        if dest.exists():
-            stem = dest.stem
-            suffix = dest.suffix
-            n = 2
-            while True:
-                candidate = dest_dir / f"{stem}_{n}{suffix}"
-                if not candidate.exists():
-                    dest = candidate
-                    break
-                n += 1
+    if not safe_name or safe_name in {".", ".."}:
+        return {
+            "status": "error",
+            "error": "invalid archive filename",
+            "code": "path_escape",
+        }
 
-        if delete_source:
-            shutil.move(str(src), str(dest))
-        else:
-            # Copy via a temp name so a crash never leaves a half-written
-            # file under the final name.
-            partial = dest.with_name(dest.name + ".part")
-            try:
-                shutil.copy2(str(src), str(partial))
-                os.replace(str(partial), str(dest))
-            except OSError:
-                partial.unlink(missing_ok=True)
-                raise
-    except OSError as exc:
-        return {"status": "error", "error": f"could not file document: {exc}"}
+    dest = _unique_archive_destination(dest_dir, safe_name)
+    if isinstance(dest, dict):
+        return dest
+
+    placed = _place_file_in_archive_dir(
+        src,
+        dest_dir,
+        dest.name,
+        delete_source=delete_source,
+    )
+    if isinstance(placed, dict):
+        return placed
+
+    # Defense in depth: resolved archive path must remain under the category root.
+    if not path_is_within(placed, category_root):
+        try:
+            placed.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return {
+            "status": "error",
+            "error": "archive path resolved outside the category folder",
+            "code": "path_escape",
+        }
 
     return {
         "status": "success",
-        "archive_path": str(dest.resolve()),
-        "filename": dest.name,
+        "archive_path": str(placed.resolve()),
+        "filename": placed.name,
         "doc_type": safe_type,
         "year": year_part,
-        "category_folder": str(category_root),
+        "category_folder": str(category_root.resolve()),
     }
 
 
@@ -657,6 +994,7 @@ def copy_local_scan_to_inbox(source: Path, *, max_bytes: int) -> dict[str, Any]:
     except OSError as exc:
         partial.unlink(missing_ok=True)
         return {"status": "error", "error": f"could not save file: {exc}"}
+    harden_app_owned_file(dest)
     return {
         "status": "success",
         "path": str(dest.resolve()),
@@ -704,7 +1042,7 @@ async def stream_upload_to_inbox(
     size = 0
     exceeded = False
     try:
-        with partial.open("wb") as out:
+        with open_private_file(partial, binary=True) as out:
             while True:
                 chunk = await upload.read(chunk_size)
                 if not chunk:
@@ -746,6 +1084,7 @@ async def stream_upload_to_inbox(
         partial.unlink(missing_ok=True)
         raise
 
+    harden_app_owned_file(dest)
     return {
         "status": "success",
         "path": str(dest.resolve()),
