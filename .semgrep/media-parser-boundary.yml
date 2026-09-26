@@ -17,12 +17,12 @@ rules:
       - pattern-either:
           - pattern: import pypdf
           - pattern: import pypdf.$X
-          - pattern: from pypdf import ...
-          - pattern: from pypdf.$X import ...
+          - pattern: from pypdf import $X
+          - pattern: from pypdf.$M import $X
     paths:
       exclude:
-        - deepcatalog/media_worker.py
-        - tests/**
+        - "**/deepcatalog/media_worker.py"
+        - "**/tests/**"
 
   - id: deepcatalog-no-pdf2image-outside-media-worker
     languages: [python]
@@ -33,11 +33,11 @@ rules:
     patterns:
       - pattern-either:
           - pattern: import pdf2image
-          - pattern: from pdf2image import ...
+          - pattern: from pdf2image import $X
     paths:
       exclude:
-        - deepcatalog/media_worker.py
-        - tests/**
+        - "**/deepcatalog/media_worker.py"
+        - "**/tests/**"
 
   - id: deepcatalog-no-pil-outside-media-worker
     languages: [python]
@@ -50,9 +50,9 @@ rules:
       - pattern-either:
           - pattern: import PIL
           - pattern: import PIL.$X
-          - pattern: from PIL import ...
-          - pattern: from PIL.$X import ...
+          - pattern: from PIL import $X
+          - pattern: from PIL.$M import $X
     paths:
       exclude:
-        - deepcatalog/media_worker.py
-        - tests/**
+        - "**/deepcatalog/media_worker.py"
+        - "**/tests/**"
