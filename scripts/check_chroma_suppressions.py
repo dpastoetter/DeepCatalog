@@ -106,8 +106,10 @@ def main(argv: list[str] | None = None) -> int:
     vuln_ids = ignore_vuln_ids(rows)
 
     if args.pip_audit_args:
+        # One flag token per line so bash mapfile keeps --ignore-vuln and ID separate.
         for vuln_id in vuln_ids:
-            print(f"--ignore-vuln {vuln_id}")
+            print("--ignore-vuln")
+            print(vuln_id)
         return 0
 
     today = (

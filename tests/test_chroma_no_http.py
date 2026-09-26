@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import ast
+import io
 import json
 import socket
+from contextlib import redirect_stdout
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -249,6 +251,8 @@ def test_check_chroma_suppressions_script_fails_when_expired():
 
 
 def test_dependency_audit_uses_suppression_json_and_watch_script():
+    import importlib.util
+
     audit = (_REPO / "scripts" / "dependency-audit.sh").read_text(encoding="utf-8")
     assert "check_chroma_suppressions.py" in audit
     assert "chroma_vuln_suppressions.json" in audit
@@ -257,6 +261,25 @@ def test_dependency_audit_uses_suppression_json_and_watch_script():
         assert row["id"]
     # Script must obtain ignore flags from the JSON helper (not hard-code only).
     assert "--pip-audit-args" in audit
+    # Emit separate argv tokens (flag, then id) so bash mapfile does not glue
+    # "--ignore-vuln ID" into one unrecognized pip-audit argument.
+    spec = importlib.util.spec_from_file_location(
+        "check_chroma_suppressions",
+        _REPO / "scripts" / "check_chroma_suppressions.py",
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        assert mod.main(["--pip-audit-args"]) == 0
+    lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+    assert lines and lines[0] == "--ignore-vuln"
+    assert lines[1] == payload["suppressions"][0]["id"]
+    assert all(lines[i] == "--ignore-vuln" for i in range(0, len(lines), 2))
+    assert {lines[i] for i in range(1, len(lines), 2)} == {
+        row["id"] for row in payload["suppressions"]
+    }
     watch = (_REPO / "scripts" / "chroma-advisory-watch.py").read_text(encoding="utf-8")
     assert "chroma_vuln_suppressions.json" in watch
     assert '"--ignore-vuln"' not in watch
